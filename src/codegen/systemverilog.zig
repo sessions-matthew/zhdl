@@ -514,8 +514,13 @@ pub const SystemVerilogEmitter = struct {
 
         // 3. Emit clock generators
         for (tb.clock_gens) |cg| {
-            const half_period = if (cg.period_ns >= 2) cg.period_ns / 2 else 1;
-            try writer.print("    always #{d} {s} = ~{s};\n", .{ half_period, cg.clk_name, cg.clk_name });
+            if (cg.raw.len > 0) {
+                const half = if (cg.period_ns >= 2) cg.period_ns / 2 else 1;
+                try writer.print("    always #{d}ns {s} = ~{s};\n", .{ half, cg.clk_name, cg.clk_name });
+            } else {
+                const half = if (cg.period_ns >= 2) cg.period_ns / 2 else 1;
+                try writer.print("    always #{d}ns {s} = ~{s};\n", .{ half, cg.clk_name, cg.clk_name });
+            }
         }
         if (tb.clock_gens.len > 0) {
             try writer.writeAll("\n");
@@ -555,7 +560,11 @@ pub const SystemVerilogEmitter = struct {
                 },
                 .delay => {
                     const d = stmt.data.delay;
-                    try writer.print("        #{d};\n", .{d.ns});
+                    if (d.raw.len > 0) {
+                        try writer.print("        #{s};\n", .{d.raw});
+                    } else {
+                        try writer.print("        #{d}ns;\n", .{d.ns});
+                    }
                 },
                 .assign => {
                     const a = stmt.data.assign;
@@ -584,7 +593,17 @@ pub const SystemVerilogEmitter = struct {
                 },
                 .wait_for => {
                     const wf = stmt.data.wait_for;
-                    if (wf.max_cycles) |max_c| {
+                    if (wf.timeout_raw) |t_raw| {
+                        try writer.writeAll("        fork\n");
+                        try writer.writeAll("            begin\n");
+                        try writer.writeAll("                wait (");
+                        try self.emitExpr(wf.cond, writer);
+                        try writer.writeAll(");\n");
+                        try writer.writeAll("            end\n");
+                        try writer.print("            begin\n                #{s};\n                $error(\"[TIMEOUT] wait_for timed out after {s}\");\n                $fatal(1);\n            end\n", .{ t_raw, t_raw });
+                        try writer.writeAll("        join_any\n");
+                        try writer.writeAll("        disable fork;\n");
+                    } else if (wf.max_cycles) |max_c| {
                         try writer.writeAll("        fork\n");
                         try writer.writeAll("            begin\n");
                         try writer.writeAll("                wait (");

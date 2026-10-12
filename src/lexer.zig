@@ -225,6 +225,25 @@ pub const Lexer = struct {
             }
         }
 
+        // Check if followed immediately by a time unit suffix: ps, ns, us, ms, s
+        const rem = self.source[self.index..];
+        const suffixes = [_][]const u8{ "ps", "ns", "us", "ms", "s" };
+        for (suffixes) |suffix| {
+            if (std.mem.startsWith(u8, rem, suffix)) {
+                const next_idx = self.index + suffix.len;
+                if (next_idx >= self.source.len or !isIdentifierChar(self.source[next_idx])) {
+                    for (suffix) |_| {
+                        self.advance();
+                    }
+                    return .{
+                        .tag = .time_literal,
+                        .loc = loc,
+                        .slice = self.source[start_idx..self.index],
+                    };
+                }
+            }
+        }
+
         return .{
             .tag = .number,
             .loc = loc,

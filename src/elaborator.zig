@@ -492,6 +492,20 @@ pub const Elaborator = struct {
                 };
                 return new_e;
             },
+            .time_literal => {
+                new_e.* = .{
+                    .tag = .time_literal,
+                    .loc = expr.loc,
+                    .data = .{
+                        .time_literal = .{
+                            .val = expr.data.time_literal.val,
+                            .unit = expr.data.time_literal.unit,
+                            .raw = try alloc.dupe(u8, expr.data.time_literal.raw),
+                        },
+                    },
+                };
+                return new_e;
+            },
             .boolean => {
                 new_e.* = .{
                     .tag = .boolean,
@@ -1544,6 +1558,16 @@ pub const Elaborator = struct {
         };
     }
 
+    fn convertToNs(lit: ast.TimeLiteral) u64 {
+        return switch (lit.unit) {
+            .ps => if (lit.val > 0 and lit.val < 1000) 1 else lit.val / 1000,
+            .ns => lit.val,
+            .us => lit.val * 1_000,
+            .ms => lit.val * 1_000_000,
+            .s => lit.val * 1_000_000_000,
+        };
+    }
+
     fn lowerSimStatement(
         self: *Elaborator,
         alloc: std.mem.Allocator,
@@ -1580,13 +1604,22 @@ pub const Elaborator = struct {
                         if (ma.target.tag == .identifier) {
                             const obj_name = ma.target.data.identifier;
                             if (std.mem.eql(u8, ma.field, "generate")) {
-                                const period: u64 = if (c.args.len > 0 and c.args[0].tag == .number)
-                                    c.args[0].data.number.val
-                                else
-                                    10;
+                                var period: u64 = 10;
+                                var raw_str: []const u8 = "10ns";
+                                if (c.args.len > 0) {
+                                    const p = c.args[0];
+                                    if (p.tag == .time_literal) {
+                                        raw_str = p.data.time_literal.raw;
+                                        period = convertToNs(p.data.time_literal);
+                                    } else if (p.tag == .number) {
+                                        period = p.data.number.val;
+                                        raw_str = try std.fmt.allocPrint(alloc, "{d}ns", .{period});
+                                    }
+                                }
                                 try clock_gens.append(.{
                                     .clk_name = obj_name,
                                     .period_ns = period,
+                                    .raw = raw_str,
                                 });
                                 try sim_stmts.append(.{
                                     .tag = .clk_generate,
@@ -1594,6 +1627,7 @@ pub const Elaborator = struct {
                                         .clk_generate = .{
                                             .clk_name = obj_name,
                                             .period_ns = period,
+                                            .raw = raw_str,
                                         },
                                     },
                                 });
@@ -1668,6 +1702,58 @@ pub const Elaborator = struct {
                                 });
                                 return;
                             }
+                        } else if (std.mem.eql(u8, fn_name, "assert_within")) {
+                            if (c.args.len >= 2) {
+                                const cond = try self.lowerExpr(alloc, c.args[0], reg_map, signal_types);
+                                var max_cycles: ?u64 = null;
+                                var timeout_raw: ?[]const u8 = null;
+                                const timeout = c.args[1];
+                                if (timeout.tag == .time_literal) {
+                                    timeout_raw = timeout.data.time_literal.raw;
+                                    max_cycles = null;
+                                } else if (timeout.tag == .number) {
+                                    max_cycles = timeout.data.number.val;
+                                    timeout_raw = null;
+                                }
+                                try sim_stmts.append(.{
+                                    .tag = .wait_for,
+                                    .data = .{
+                                        .wait_for = .{
+                                            .cond = cond,
+                                            .max_cycles = max_cycles,
+                                            .timeout_raw = timeout_raw,
+                                        },
+                                    },
+                                });
+                                return;
+                            }
+                        } else if (std.mem.eql(u8, fn_name, "wait_for")) {
+                            if (c.args.len > 0) {
+                                const cond = try self.lowerExpr(alloc, c.args[0], reg_map, signal_types);
+                                var max_cycles: ?u64 = null;
+                                var timeout_raw: ?[]const u8 = null;
+                                if (c.args.len >= 2) {
+                                    const timeout = c.args[1];
+                                    if (timeout.tag == .time_literal) {
+                                        timeout_raw = timeout.data.time_literal.raw;
+                                        max_cycles = null;
+                                    } else if (timeout.tag == .number) {
+                                        max_cycles = timeout.data.number.val;
+                                        timeout_raw = null;
+                                    }
+                                }
+                                try sim_stmts.append(.{
+                                    .tag = .wait_for,
+                                    .data = .{
+                                        .wait_for = .{
+                                            .cond = cond,
+                                            .max_cycles = max_cycles,
+                                            .timeout_raw = timeout_raw,
+                                        },
+                                    },
+                                });
+                                return;
+                            }
                         } else if (std.mem.eql(u8, fn_name, "trace")) {
                             const vcd_path: []const u8 = if (c.args.len > 0 and c.args[0].tag == .string)
                                 c.args[0].data.string
@@ -1683,15 +1769,24 @@ pub const Elaborator = struct {
                             });
                             return;
                         } else if (std.mem.eql(u8, fn_name, "delay")) {
-                            const ns: u64 = if (c.args.len > 0 and c.args[0].tag == .number)
-                                c.args[0].data.number.val
-                            else
-                                10;
+                            var ns: u64 = 10;
+                            var raw_str: []const u8 = "10ns";
+                            if (c.args.len > 0) {
+                                const t = c.args[0];
+                                if (t.tag == .time_literal) {
+                                    raw_str = t.data.time_literal.raw;
+                                    ns = convertToNs(t.data.time_literal);
+                                } else if (t.tag == .number) {
+                                    ns = t.data.number.val;
+                                    raw_str = t.data.number.raw;
+                                }
+                            }
                             try sim_stmts.append(.{
                                 .tag = .delay,
                                 .data = .{
                                     .delay = .{
                                         .ns = ns,
+                                        .raw = raw_str,
                                     },
                                 },
                             });
@@ -2619,6 +2714,18 @@ pub const Elaborator = struct {
                         .lit = .{
                             .val = expr.data.number.val,
                             .raw = expr.data.number.raw,
+                        },
+                    },
+                };
+            },
+            .time_literal => {
+                h_expr.* = .{
+                    .tag = .lit,
+                    .hir_type = .{ .tag = .bits, .width = 64 },
+                    .data = .{
+                        .lit = .{
+                            .val = convertToNs(expr.data.time_literal),
+                            .raw = expr.data.time_literal.raw,
                         },
                     },
                 };
@@ -4118,6 +4225,7 @@ pub const Elaborator = struct {
     fn evalConstEx(self: *Elaborator, expr: *ast.Expr, local_consts: ?*const std.StringHashMap(u64)) u64 {
         switch (expr.tag) {
             .number => return expr.data.number.val,
+            .time_literal => return convertToNs(expr.data.time_literal),
             .boolean => return if (expr.data.boolean) 1 else 0,
             .identifier => {
                 if (local_consts) |lc| {

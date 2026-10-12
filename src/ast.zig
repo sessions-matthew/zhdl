@@ -73,8 +73,23 @@ pub const NamedExpr = struct {
     loc: SourceLoc,
 };
 
+pub const TimeUnit = enum {
+    ps,
+    ns,
+    us,
+    ms,
+    s,
+};
+
+pub const TimeLiteral = struct {
+    val: u64,
+    unit: TimeUnit,
+    raw: []const u8,
+};
+
 pub const ExprTag = enum {
     number,
+    time_literal,
     boolean,
     string,
     identifier,
@@ -101,6 +116,7 @@ pub const Expr = struct {
             val: u64,
             raw: []const u8,
         },
+        time_literal: TimeLiteral,
         boolean: bool,
         string: []const u8,
         identifier: []const u8,

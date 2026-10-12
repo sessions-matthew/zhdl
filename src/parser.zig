@@ -1423,6 +1423,44 @@ pub const Parser = struct {
             return e;
         }
 
+        // Time literal
+        if (self.check(.time_literal)) {
+            const raw = self.current.slice;
+            var unit: ast.TimeUnit = .ns;
+            var num_part: []const u8 = raw;
+            if (std.mem.endsWith(u8, raw, "ps")) {
+                unit = .ps;
+                num_part = raw[0 .. raw.len - 2];
+            } else if (std.mem.endsWith(u8, raw, "ns")) {
+                unit = .ns;
+                num_part = raw[0 .. raw.len - 2];
+            } else if (std.mem.endsWith(u8, raw, "us")) {
+                unit = .us;
+                num_part = raw[0 .. raw.len - 2];
+            } else if (std.mem.endsWith(u8, raw, "ms")) {
+                unit = .ms;
+                num_part = raw[0 .. raw.len - 2];
+            } else if (std.mem.endsWith(u8, raw, "s")) {
+                unit = .s;
+                num_part = raw[0 .. raw.len - 1];
+            }
+            const val = parseDec(num_part) catch 0;
+            const e = try alloc.create(ast.Expr);
+            e.* = .{
+                .tag = .time_literal,
+                .loc = loc,
+                .data = .{
+                    .time_literal = .{
+                        .val = val,
+                        .unit = unit,
+                        .raw = raw,
+                    },
+                },
+            };
+            self.advance();
+            return e;
+        }
+
         // Boolean
         if (self.match(.kw_true)) {
             const e = try alloc.create(ast.Expr);

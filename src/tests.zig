@@ -812,6 +812,64 @@ fn runVerilatorLint(allocator: std.mem.Allocator, sv_source: []const u8) !void {
     }
 }
 
+fn runVerilatorSim(allocator: std.mem.Allocator, sv_source: []const u8) !void {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const tmp_sv = ".test_tmp_sim.sv";
+    const sim_dir = ".test_tmp_sim_dir";
+    const out_file = try cwd.createFile(io, tmp_sv, .{});
+    try out_file.writeStreamingAll(io, sv_source);
+    out_file.close(io);
+    defer {
+        cwd.deleteFile(io, tmp_sv) catch {};
+        const rm_res = std.process.run(allocator, io, .{
+            .argv = &.{ "rm", "-rf", sim_dir },
+        }) catch null;
+        if (rm_res) |res| {
+            allocator.free(res.stdout);
+            allocator.free(res.stderr);
+        }
+    }
+
+    const v_res = try std.process.run(allocator, io, .{
+        .argv = &.{
+            "verilator",
+            "--binary",
+            "--timing",
+            "-Wno-fatal",
+            "-Wno-MULTIDRIVEN",
+            tmp_sv,
+            "--prefix",
+            "Vtb",
+            "-Mdir",
+            sim_dir,
+        },
+    });
+    defer {
+        allocator.free(v_res.stdout);
+        allocator.free(v_res.stderr);
+    }
+    if (v_res.term != .exited or v_res.term.exited != 0) {
+        std.debug.print("Verilator sim compile failed:\n{s}\n{s}\n", .{ v_res.stdout, v_res.stderr });
+        return error.VerilatorCompileFailed;
+    }
+
+    const exe_path = try std.fmt.allocPrint(allocator, "{s}/Vtb", .{sim_dir});
+    defer allocator.free(exe_path);
+
+    const run_res = try std.process.run(allocator, io, .{
+        .argv = &.{exe_path},
+    });
+    defer {
+        allocator.free(run_res.stdout);
+        allocator.free(run_res.stderr);
+    }
+    if (run_res.term != .exited or run_res.term.exited != 0) {
+        std.debug.print("Simulation execution failed:\n{s}\n{s}\n", .{ run_res.stdout, run_res.stderr });
+        return error.SimulationFailed;
+    }
+}
+
 test "hardware optional: declaration, valid/data fields, auto-wrapping, and reset to null" {
     const src =
         \\pub const OptionalDevice = module {
@@ -1689,6 +1747,166 @@ test "generic module instantiated in hardware testbench" {
     try std.testing.expect(std.mem.indexOf(u8, sv_code, "Counter_8 dut (") != null);
 
     try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "time-based testing: delay with typed units (ns, us, ms, ps)" {
+    const src =
+        \\pub const Inverter = module {
+        \\    in a: u1,
+        \\    out y: u1,
+        \\    comb {
+        \\        y = ~a;
+        \\    }
+        \\};
+        \\
+        \\test "TimeDelay TB" {
+        \\    in a: u1;
+        \\    out y: u1;
+        \\
+        \\    const dut = Inverter.instantiate(.{
+        \\        .a = a,
+        \\        .y = y,
+        \\    });
+        \\
+        \\    sim {
+        \\        a = 0;
+        \\        delay(100ps);
+        \\        assert(y == 1, "y should be 1");
+        \\        a = 1;
+        \\        delay(50ns);
+        \\        assert(y == 0, "y should be 0");
+        \\        delay(10us);
+        \\        delay(2ms);
+        \\        delay(1s);
+        \\        finish();
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), hir_design.testbenches.len);
+    const tb = hir_design.testbenches[0];
+
+    // Verify HIR sim statement types and raw values
+    var found_ps = false;
+    var found_ns = false;
+    var found_us = false;
+    var found_ms = false;
+    var found_s = false;
+
+    for (tb.sim_stmts) |stmt| {
+        if (stmt.tag == .delay) {
+            if (std.mem.eql(u8, stmt.data.delay.raw, "100ps")) found_ps = true;
+            if (std.mem.eql(u8, stmt.data.delay.raw, "50ns") and stmt.data.delay.ns == 50) found_ns = true;
+            if (std.mem.eql(u8, stmt.data.delay.raw, "10us") and stmt.data.delay.ns == 10000) found_us = true;
+            if (std.mem.eql(u8, stmt.data.delay.raw, "2ms") and stmt.data.delay.ns == 2000000) found_ms = true;
+            if (std.mem.eql(u8, stmt.data.delay.raw, "1s") and stmt.data.delay.ns == 1000000000) found_s = true;
+        }
+    }
+
+    try std.testing.expect(found_ps);
+    try std.testing.expect(found_ns);
+    try std.testing.expect(found_us);
+    try std.testing.expect(found_ms);
+    try std.testing.expect(found_s);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#100ps;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#50ns;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#10us;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#2ms;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#1s;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "time-based testing: clk.generate and wait_for with time literal timeout" {
+    const src =
+        \\pub const StepDevice = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    out ready: u1,
+        \\    var count = reg(u4, .{ .clk = clk, .rst = rst, .init = 0 });
+        \\    comb {
+        \\        count := count +% 1;
+        \\        ready = (count >= 2);
+        \\    }
+        \\};
+        \\
+        \\test "WaitTime TB" {
+        \\    in clk: clock;
+        \\    in rst: reset;
+        \\    out ready: u1;
+        \\
+        \\    const dut = StepDevice.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .ready = ready,
+        \\    });
+        \\
+        \\    sim {
+        \\        clk.generate(10ns);
+        \\        rst.pulse(1);
+        \\        wait_for(ready == 1, 100ns);
+        \\        assert(ready == 1, "Ready should be high");
+        \\        assert_within(ready == 1, 50ns);
+        \\        finish();
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), hir_design.testbenches.len);
+    const tb = hir_design.testbenches[0];
+
+    try std.testing.expectEqual(@as(usize, 1), tb.clock_gens.len);
+    try std.testing.expectEqualStrings("clk", tb.clock_gens[0].clk_name);
+    try std.testing.expectEqual(@as(u64, 10), tb.clock_gens[0].period_ns);
+    try std.testing.expectEqualStrings("10ns", tb.clock_gens[0].raw);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always #5ns clk = ~clk;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "fork") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#100ns;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "[TIMEOUT] wait_for timed out after 100ns") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "join_any") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "disable fork;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#50ns;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "[TIMEOUT] wait_for timed out after 50ns") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
 }
 
 

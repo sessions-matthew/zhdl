@@ -245,6 +245,7 @@ pub const HirSimStmt = struct {
         clk_generate: struct {
             clk_name: []const u8,
             period_ns: u64,
+            raw: []const u8 = "",
         },
         rst_pulse: struct {
             rst_name: []const u8,
@@ -253,6 +254,7 @@ pub const HirSimStmt = struct {
         },
         delay: struct {
             ns: u64,
+            raw: []const u8 = "",
         },
         assert_stmt: struct {
             cond: *HirExpr,
@@ -268,6 +270,7 @@ pub const HirSimStmt = struct {
         wait_for: struct {
             cond: *HirExpr,
             max_cycles: ?u64,
+            timeout_raw: ?[]const u8 = null,
         },
         finish: void,
     },
@@ -276,6 +279,7 @@ pub const HirSimStmt = struct {
 pub const HirClockGen = struct {
     clk_name: []const u8,
     period_ns: u64,
+    raw: []const u8 = "",
 };
 
 pub const HirTestbench = struct {

@@ -753,15 +753,38 @@ Statements inside `sim { ... }` blocks execute sequentially in time.
 
 ### 11.3 Timing and Verification Primitives
 
+ZHdl supports both cycle-accurate synchronous testing and time-based testing with typed physical units (`ps`, `ns`, `us`, `ms`, `s`):
+
 | Simulation Primitive | Description | Generated SystemVerilog |
 |---|---|---|
-| `clk.generate(period_ns)` | Spawns an oscillating clock generator with half-period toggling | `always #(period_ns/2) clk = ~clk;` |
+| `clk.generate(10ns)` / `(10)` | Spawns an oscillating clock generator with half-period toggling | `always #5ns clk = ~clk;` |
 | `rst.pulse(cycles)` | Asserts reset active, waits $N$ clock cycles, then deasserts | Procedural reset sequence |
 | `step(clk, cycles)` | Synchronously advances simulation by $N$ rising clock edges | `repeat (cycles) @(posedge clk);` |
+| `delay(50ns)` / `delay(10us)` | Explicit physical delay with typed time units (`ps`, `ns`, `us`, `ms`, `s`) | `#50ns;` / `#10us;` |
+| `wait_for(cond, timeout)` | Waits until `cond` is asserted or fails after `timeout` (time or cycles) | `fork ... wait (cond); ... #timeout; ... join_any` |
+| `assert_within(cond, timeout)` | Asserts `cond` occurs within physical timeout or cycle limit | Bounded assertion verification |
 | `assert(cond, "msg")` | Hardware assertion check; aborts simulation with error code on failure | `if (!(cond)) begin $error("[FAIL] msg"); $fatal(1); end` |
 | `trace("path.vcd")` | Enables VCD waveform dump for GTKWave or VS Code Surfer | `$dumpfile("path.vcd"); $dumpvars(0, tb_mod);` |
-| `delay(ns)` | Explicit nanosecond physical delay | `#ns;` |
 | `finish()` | Terminates simulation successfully | `$finish;` |
+
+#### Typed Time Literals
+Time quantities in `sim` blocks support standard physical units:
+```zig
+sim {
+    clk.generate(10ns);    // 100 MHz clock
+    trace("wave.vcd");
+    rst.pulse(2);
+
+    delay(250ps);          // Sub-nanosecond setup time modeling
+    delay(50ns);           // Nanosecond timing
+    delay(10us);           // Microsecond bus delay
+    delay(2ms);            // Millisecond peripheral delay
+
+    wait_for(rx_done == 1, 100us); // Bounded time-based wait
+    assert(data == 0xA5, "Data mismatch");
+    finish();
+}
+```
 
 Testbenches are executed using the CLI:
 ```bash
