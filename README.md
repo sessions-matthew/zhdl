@@ -38,7 +38,7 @@ pub const Command = union(enum) {
 pub fn PacketFilter(comptime W: usize) type {
     return module {
         in clk: clock,
-        in rst: reset,
+        in rst_n: reset(.low),
         in cmd: Command,
         out rx_stream: ?u(W),
 
@@ -68,29 +68,29 @@ pub fn PacketFilter(comptime W: usize) type {
 
 test "PacketFilter processes commands" {
     wire clk: clock;
-    wire rst: reset;
+    wire rst_n: reset(.low);
     wire cmd: Command;
     wire rx_stream: ?u8;
 
     const dut = PacketFilter(8).instantiate(.{
         .clk = clk,
-        .rst = rst,
+        .rst_n = rst_n,
         .cmd = cmd,
         .rx_stream = rx_stream,
     });
 
     sim {
-        clk.generate(10);
+        clk.generate(100MHz); // First-class frequency literal (10ns period)
         trace("filter_tb.vcd");
-        rst.pulse(2);
+        rst_n.pulse(20ns);    // Asynchronous real-time reset pulse
 
         cmd = Command{ .ping = 0xA5 };
-        step(clk, 1);
+        clk.step();           // Synchronous 1-cycle clock step
         assert(rx_stream.valid == 1, "Should be valid");
         assert(rx_stream.data == 0xA5, "Should echo ping");
 
         cmd = Command{ .idle = 0 };
-        step(clk, 1);
+        clk.step();
         assert(rx_stream.valid == 0, "Should be idle/null");
         finish();
     }
@@ -105,7 +105,7 @@ test "PacketFilter processes commands" {
 Requires **Zig 0.17.0**:
 ```bash
 zig build -Doptimize=ReleaseFast
-# Or: zig build-exe src/main.zig -O ReleaseFast --name zhdl
+# Output binary generated at ./zig-out/bin/zhdl
 ```
 
 ### Core Commands
@@ -140,12 +140,18 @@ zig build -Doptimize=ReleaseFast
 - **`@sync2ff(dest_clk, sig)`**: 2-stage synchronizer with `(* ASYNC_REG = "TRUE" *)` synthesis attribute.
 - **Downward Slicing (`x[4..0]`)**: Reverse-order bit extraction with zero logic gates.
 
-### Zig-Inspired Type System
+### Zig-Inspired Type System & Verification
 - **`packed struct`**: Bit-exact hardware layouts, struct literals `.{ ... }`, and member slicing (`s.field`).
-- **`?T` (Hardware Optionals)**: Valid + Data channels with `null` literal, auto-wrapping, and `if (opt) |data|` payload capture.
-- **`union(enum)`**: Hardware tagged unions with discriminant tag + payload multiplexing and `switch` pattern matching with capture.
-- **Type Methods (`pub fn`)**: Pure combinational inlined helper functions attached to structs and unions.
-- **Comptime Generics (`fn(comptime ...) type`)**: Parameterized module templates monomorphized into specialized synthesizable modules.
+- **`?T` (Hardware Optionals)**: Valid + Data channels with `null` literal, auto-wrapping, and payload capture.
+- **`union(enum)`**: Hardware tagged unions with tag + payload multiplexing and `switch` pattern matching.
+- **Type Methods (`pub fn`)**: Pure combinational inlined helper functions attached directly to structs and unions.
+- **Comptime Generics (`fn(comptime ...) type`)**: Parameterized module templates monomorphized into specialized modules.
+- **Typed Reset Polarity**: `reset(.low)` and `reset(.high)` with explicit polarity and zero name heuristics.
+- **Modern Simulation Primitives**:
+  - Frequency literals (`100MHz`, `50MHz`, `1GHz`, `32kHz`) with sub-nanosecond precision.
+  - Signal-centric stepping (`clk.step(5)`, `clk.posedge()`, `clk.negedge()`).
+  - Dual-mode reset pulses: cycle-based (`rst.pulse(2)`) and duration-based (`rst.pulse(20ns)`).
+  - Timeout assertions: `wait_for(cond, 100ns)` and `wait_for(cond, 50)`.
 
 ---
 
