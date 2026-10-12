@@ -662,12 +662,104 @@ const depth = 64;
 const ptr_width = @clog2(depth); // 6
 ```
 
-### 8.8 `@import("path")`
+### 8.8 Multi-File Imports (`@import("path.zhdl")`)
 
-Imports definitions and types from another `.zhdl` file:
+ZHdl supports multi-file project modularity via `@import("path.zhdl")`. Import paths are resolved relative to the importing file (or CLI base directory), with support for in-memory virtual files in tests.
+
+#### 1. Package Namespaces
+Assigning an import expression to a constant creates a package namespace:
+
 ```zig
-const uart = @import("uart_pkg.zhdl");
+const math = @import("math_pkg.zhdl");
+const types = @import("protocol_types.zhdl");
+
+pub module Processor {
+    in clk: clock,
+    in rst: reset,
+    in hdr: types.Header,          // Dotted type annotation
+    out result: u16,
+
+    const mult = math.Multiplier.instantiate(.{
+        .a = hdr.src,
+        .b = hdr.dst,
+        .product = result,
+    });
+}
 ```
+
+#### 2. Direct Member Aliasing
+Modules and types can be directly imported into local scope:
+
+```zig
+// Direct import chaining
+const Adder = @import("alu_ops.zhdl").Adder;
+
+// Or member aliasing from a package
+const alu = @import("alu_ops.zhdl");
+const Subtractor = alu.Subtractor;
+
+pub module Top {
+    in x: u16,
+    in y: u16,
+    out s: u16,
+
+    const add0 = Adder.instantiate(.{
+        .a = x,
+        .b = y,
+        .sum = s,
+    });
+}
+```
+
+#### 3. Parameterized Generic Submodules
+Generic module templates can be imported and monomorphized across file boundaries:
+
+```zig
+const fifo_pkg = @import("fifo_pkg.zhdl");
+
+pub module SystemTop {
+    in clk: clock,
+    in rst: reset,
+
+    const fifo8 = fifo_pkg.SyncFifo(8, 32).instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        // ...
+    });
+}
+```
+
+#### 4. Types, Packed Struct Methods, and Constants
+Imported packed structs and tagged unions retain their methods and field layouts:
+
+```zig
+// protocol.zhdl
+pub const MAGIC: u8 = 0x5A;
+pub const Packet = packed struct {
+    tag: u8,
+    len: u8,
+
+    pub fn isValid(self: Packet) u1 {
+        return self.tag == 0x5A;
+    }
+};
+
+// parser.zhdl
+const proto = @import("protocol.zhdl");
+
+pub module FrameChecker {
+    in pkt: proto.Packet,
+    out ok: u1,
+    out expected_tag: u8,
+
+    ok = pkt.isValid();          // Inlined type method
+    expected_tag = proto.MAGIC;  // Package constant
+}
+```
+
+#### 5. Transitive Imports & Circular Import Detection
+- **Transitive Submodules**: When module `A` imports `B`, and `B` instantiates submodules from `C`, all transitively reachable modules are discovered, elaborated, and emitted into the synthesizable SystemVerilog output.
+- **Cycle Prevention**: Circular import chains ($A \to B \to A$) are detected during elaboration and rejected with `error.CircularImport` and a formatted dependency diagnostic trace.
 
 ---
 

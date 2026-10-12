@@ -3002,6 +3002,444 @@ test "optional sim block: flat testbench with var decl and inline for" {
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
 
+test "multi-file @import: package submodule instantiation and codegen" {
+    var vfiles = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer vfiles.deinit();
+
+    const math_pkg =
+        \\pub const Multiplier = module {
+        \\    in a: u8,
+        \\    in b: u8,
+        \\    out product: u16,
+        \\    comb {
+        \\        product = a * b;
+        \\    }
+        \\};
+    ;
+    try vfiles.put("math_pkg.zhdl", math_pkg);
+
+    const src =
+        \\const math = @import("math_pkg.zhdl");
+        \\
+        \\pub const Top = module {
+        \\    in x: u8,
+        \\    in y: u8,
+        \\    out res: u16,
+        \\
+        \\    const mult = math.Multiplier.instantiate(.{
+        \\        .a = x,
+        \\        .b = y,
+        \\        .product = res,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    elaborator.setVirtualFiles(&vfiles);
+
+    var hir_design = try elaborator.elaborate("Top");
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Multiplier ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Top ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "Multiplier u_mult (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "multi-file @import: direct member alias import" {
+    var vfiles = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer vfiles.deinit();
+
+    const alu_pkg =
+        \\pub const Adder = module {
+        \\    in a: u16,
+        \\    in b: u16,
+        \\    out sum: u16,
+        \\    comb {
+        \\        sum = a + b;
+        \\    }
+        \\};
+    ;
+    try vfiles.put("alu_ops.zhdl", alu_pkg);
+
+    const src =
+        \\const Adder = @import("alu_ops.zhdl").Adder;
+        \\
+        \\pub const Top = module {
+        \\    in x: u16,
+        \\    in y: u16,
+        \\    out s: u16,
+        \\
+        \\    const add0 = Adder.instantiate(.{
+        \\        .a = x,
+        \\        .b = y,
+        \\        .sum = s,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    elaborator.setVirtualFiles(&vfiles);
+
+    var hir_design = try elaborator.elaborate("Top");
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Adder ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Top ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "Adder u_add0 (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "multi-file @import: generic parameterized module import" {
+    var vfiles = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer vfiles.deinit();
+
+    const mux_pkg =
+        \\pub fn ParamMux(comptime WIDTH: u32) type {
+        \\    return module {
+        \\        in sel: u1,
+        \\        in a: u(WIDTH),
+        \\        in b: u(WIDTH),
+        \\        out y: u(WIDTH),
+        \\        comb {
+        \\            y = if (sel == 1) b else a;
+        \\        }
+        \\    };
+        \\}
+    ;
+    try vfiles.put("mux_pkg.zhdl", mux_pkg);
+
+    const src =
+        \\const mux_mod = @import("mux_pkg.zhdl");
+        \\
+        \\pub const Top = module {
+        \\    in sel: u1,
+        \\    in d0: u8,
+        \\    in d1: u8,
+        \\    out out_d: u8,
+        \\
+        \\    const mux8 = mux_mod.ParamMux(8).instantiate(.{
+        \\        .sel = sel,
+        \\        .a = d0,
+        \\        .b = d1,
+        \\        .y = out_d,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    elaborator.setVirtualFiles(&vfiles);
+
+    var hir_design = try elaborator.elaborate("Top");
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "ParamMux_8") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "multi-file @import: imported packed struct with type methods and constants" {
+    var vfiles = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer vfiles.deinit();
+
+    const packet_pkg =
+        \\pub const MAGIC_FLAG: u8 = 42;
+        \\
+        \\pub const Header = packed struct {
+        \\    src: u4,
+        \\    dst: u4,
+        \\    flags: u8,
+        \\
+        \\    pub fn isValid(self: Header) u1 {
+        \\        return (self.flags == 42);
+        \\    }
+        \\};
+    ;
+    try vfiles.put("packet.zhdl", packet_pkg);
+
+    const src =
+        \\const pkt = @import("packet.zhdl");
+        \\
+        \\pub const Validator = module {
+        \\    in hdr: pkt.Header,
+        \\    out valid: u1,
+        \\    out expected: u8,
+        \\
+        \\    comb {
+        \\        valid = hdr.isValid();
+        \\        expected = pkt.MAGIC_FLAG;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    elaborator.setVirtualFiles(&vfiles);
+
+    var hir_design = try elaborator.elaborate("Validator");
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "hdr[15:8] == 8'd42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "expected = 8'd42;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "multi-file @import: transitive imports" {
+    var vfiles = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer vfiles.deinit();
+
+    const c_pkg =
+        \\pub const Leaf = module {
+        \\    in in_val: u8,
+        \\    out out_val: u8,
+        \\    comb {
+        \\        out_val = in_val + 1;
+        \\    }
+        \\};
+    ;
+    const b_pkg =
+        \\const c = @import("c.zhdl");
+        \\pub const Mid = module {
+        \\    in in_val: u8,
+        \\    out out_val: u8,
+        \\    const leaf = c.Leaf.instantiate(.{
+        \\        .in_val = in_val,
+        \\        .out_val = out_val,
+        \\    });
+        \\};
+    ;
+    try vfiles.put("c.zhdl", c_pkg);
+    try vfiles.put("b.zhdl", b_pkg);
+
+    const src =
+        \\const b = @import("b.zhdl");
+        \\pub const Root = module {
+        \\    in x: u8,
+        \\    out y: u8,
+        \\    const mid = b.Mid.instantiate(.{
+        \\        .in_val = x,
+        \\        .out_val = y,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    elaborator.setVirtualFiles(&vfiles);
+
+    var hir_design = try elaborator.elaborate("Root");
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Leaf ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Mid ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Root ") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "multi-file @import: circular import error detection" {
+    var vfiles = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer vfiles.deinit();
+
+    const a_pkg =
+        \\const cycle_b = @import("cycle_b.zhdl");
+        \\pub const ModA = module {
+        \\    in x: u1,
+        \\    out y: u1,
+        \\    comb { y = x; }
+        \\};
+    ;
+    const b_pkg =
+        \\const cycle_a = @import("cycle_a.zhdl");
+        \\pub const ModB = module {
+        \\    in x: u1,
+        \\    out y: u1,
+        \\    comb { y = x; }
+        \\};
+    ;
+    try vfiles.put("cycle_a.zhdl", a_pkg);
+    try vfiles.put("cycle_b.zhdl", b_pkg);
+
+    const src =
+        \\const cycle_a = @import("cycle_a.zhdl");
+        \\pub const Top = module {
+        \\    in x: u1,
+        \\    out y: u1,
+        \\    comb { y = x; }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    elaborator.setVirtualFiles(&vfiles);
+
+    const result = elaborator.elaborate("Top");
+    try std.testing.expectError(error.CircularImport, result);
+}
+
+test "multi-file @import: missing imported file error" {
+    const src =
+        \\const missing = @import("does_not_exist_xyz.zhdl");
+        \\pub const Top = module {
+        \\    in x: u1,
+        \\    out y: u1,
+        \\    comb { y = x; }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    const result = elaborator.elaborate("Top");
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "multi-file @import: testbench instantiating imported DUT and sim run" {
+    var vfiles = std.StringHashMap([]const u8).init(std.testing.allocator);
+    defer vfiles.deinit();
+
+    const counter_pkg =
+        \\pub const UpCounter = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    out val: u8,
+        \\
+        \\    reg count: u8 = 0;
+        \\    count := count +% 1;
+        \\    val = count;
+        \\};
+    ;
+    try vfiles.put("counter.zhdl", counter_pkg);
+
+    const src =
+        \\const cnt_pkg = @import("counter.zhdl");
+        \\
+        \\test "Imported Counter TB" {
+        \\    wire clk: clock;
+        \\    wire rst: reset;
+        \\    wire val: u8;
+        \\
+        \\    const dut = cnt_pkg.UpCounter.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .val = val,
+        \\    });
+        \\
+        \\    clk.generate(100MHz);
+        \\    rst.pulse(20ns);
+        \\    clk.step(4);
+        \\    clk.negedge();
+        \\    assert(val == 4, "val should be 4 after 4 steps");
+        \\    finish();
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    elaborator.setVirtualFiles(&vfiles);
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), hir_design.testbenches.len);
+    try std.testing.expectEqual(@as(usize, 1), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module UpCounter ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module tb_Imported_Counter_TB;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+
 
 
 

@@ -81,6 +81,12 @@ pub fn main(init: std.process.Init) !void {
         // Elaborate AST -> HIR
         var elaborator = elaborator_mod.Elaborator.init(allocator, &ast_tree);
         defer elaborator.deinit();
+        elaborator.setIo(io);
+        if (std.fs.path.dirname(input_path)) |dir| {
+            elaborator.setBaseDir(dir);
+        } else {
+            elaborator.setBaseDir(".");
+        }
 
         var hir_design = elaborator.elaborate(top_module) catch |err| {
             std.debug.print("Elaboration error: {s}\n", .{@errorName(err)});

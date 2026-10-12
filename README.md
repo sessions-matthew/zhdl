@@ -210,6 +210,24 @@ pub module Fifo(comptime DEPTH: usize, comptime WIDTH: usize) { ... }
 pub module Counter(WIDTH: usize) { ... }
 ```
 
+### 8. Multi-File Modularity (`@import`)
+First-class multi-file imports for modules, generic templates, packed structs, constants, and helper functions:
+```zig
+const math = @import("math_pkg.zhdl");
+const Adder = @import("alu.zhdl").Adder;
+
+pub module Top {
+    in x: u8,
+    in y: u8,
+    out sum: u8,
+    out prod: u16,
+
+    const add0 = Adder.instantiate(.{ .a = x, .b = y, .sum = sum });
+    const mult = math.Multiplier.instantiate(.{ .a = x, .b = y, .product = prod });
+}
+```
+Transitive submodule hierarchies are automatically resolved and emitted on-demand into synthesizable SystemVerilog, with compile-time circular import protection.
+
 ---
 
 ## Language Ergonomics & Verification

@@ -1335,13 +1335,26 @@ pub const Parser = struct {
                 return t;
             }
 
-            // Named type like clock, or custom type
+            // Named type like clock, or custom type (including dotted pkg.Type)
+            var final_name = name;
+            if (self.check(.dot) and self.peek_token.tag == .identifier) {
+                var name_buf = ArrayList(u8).init(alloc);
+                try name_buf.appendSlice(name);
+                while (self.check(.dot) and self.peek_token.tag == .identifier) {
+                    _ = self.match(.dot);
+                    const sub_tok = try self.expect(.identifier);
+                    try name_buf.append('.');
+                    try name_buf.appendSlice(sub_tok.slice);
+                }
+                final_name = try name_buf.toOwnedSlice();
+            }
+
             const t = try alloc.create(ast.Type);
             t.* = .{
                 .tag = .named,
                 .loc = type_loc,
                 .data = .{
-                    .named = name,
+                    .named = final_name,
                 },
             };
             return t;
