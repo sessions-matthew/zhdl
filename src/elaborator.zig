@@ -1840,6 +1840,14 @@ pub const Elaborator = struct {
                     try signals.append(.{ .name = r.name, .hir_type = h_type });
                     try signal_types.put(r.name, h_type);
                 },
+                .stmt => {
+                    if (item.data.stmt.tag == .var_decl) {
+                        const vd = item.data.stmt.data.var_decl;
+                        const h_type: hir.HirType = if (vd.type_annot) |ta| try self.lowerType(ta) else .{ .tag = .bits, .width = 32 };
+                        try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                        try signal_types.put(vd.name, h_type);
+                    }
+                },
                 else => {},
             }
         }
@@ -1889,11 +1897,46 @@ pub const Elaborator = struct {
             }
         }
 
-        // 3. Process sim blocks
+        // 3. Process simulation statements (from sim blocks, flat statements, and anonymous blocks)
         for (items) |item| {
             if (item.tag == .sim_block) {
                 for (item.data.sim_block.stmts) |stmt| {
                     try self.lowerSimStatement(alloc, stmt, &sim_stmts, &clock_gens, &reg_map, &signal_types);
+                }
+            } else if (item.tag == .stmt) {
+                try self.lowerSimStatement(alloc, item.data.stmt, &sim_stmts, &clock_gens, &reg_map, &signal_types);
+            } else if (item.tag == .comb_block) {
+                for (item.data.comb_block.stmts) |stmt| {
+                    try self.lowerSimStatement(alloc, stmt, &sim_stmts, &clock_gens, &reg_map, &signal_types);
+                }
+            } else if (item.tag == .const_decl) {
+                const c = item.data.const_decl;
+                if (c.val.tag != .type_expr and self.resolveGenericCall(c.val, items) == null) {
+                    if (c.type_annot != null) {
+                        const is_zero = (c.val.tag == .number and c.val.data.number.val == 0);
+                        if (!is_zero) {
+                            const target = try alloc.create(hir.HirExpr);
+                            const h_type = signal_types.get(c.name) orelse hir.HirType{ .tag = .bits, .width = 32 };
+                            target.* = .{
+                                .tag = .signal_ref,
+                                .hir_type = h_type,
+                                .data = .{ .signal_ref = .{ .name = c.name } },
+                            };
+                            const val = try self.lowerExpr(alloc, c.val, &reg_map, &signal_types);
+                            if (val.tag == .lit and h_type.width > 0) {
+                                val.hir_type.width = h_type.width;
+                            }
+                            try sim_stmts.append(.{
+                                .tag = .assign,
+                                .data = .{
+                                    .assign = .{
+                                        .target = target,
+                                        .value = val,
+                                    },
+                                },
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -2487,6 +2530,44 @@ pub const Elaborator = struct {
                         }
                     }
                 }
+            },
+            .var_decl => {
+                const vd = stmt.data.var_decl;
+                const target = try alloc.create(hir.HirExpr);
+                const h_type = signal_types.get(vd.name) orelse hir.HirType{ .tag = .bits, .width = 32 };
+                target.* = .{
+                    .tag = .signal_ref,
+                    .hir_type = h_type,
+                    .data = .{ .signal_ref = .{ .name = vd.name } },
+                };
+                const val_expr = try self.lowerExpr(alloc, vd.init_val, reg_map, signal_types);
+                if (val_expr.tag == .lit and h_type.width > 0) {
+                    val_expr.hir_type.width = h_type.width;
+                    if (h_type.is_signed) val_expr.hir_type.is_signed = true;
+                }
+                try sim_stmts.append(.{
+                    .tag = .assign,
+                    .data = .{
+                        .assign = .{
+                            .target = target,
+                            .value = val_expr,
+                        },
+                    },
+                });
+            },
+            .inline_for => {
+                const loop = stmt.data.inline_for;
+                const start_val = if (loop.start.tag == .number) loop.start.data.number.val else 0;
+                const end_val = if (loop.end.tag == .number) loop.end.data.number.val else 0;
+
+                var idx = start_val;
+                while (idx < end_val) : (idx += 1) {
+                    try self.constants.put(loop.var_name, idx);
+                    for (loop.body) |s| {
+                        try self.lowerSimStatement(alloc, s, sim_stmts, clock_gens, reg_map, signal_types);
+                    }
+                }
+                _ = self.constants.remove(loop.var_name);
             },
             else => {},
         }

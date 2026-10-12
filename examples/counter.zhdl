@@ -39,28 +39,26 @@ test "Counter increments and rolls over at 255" {
         .rev_nibble = rev_nibble,
     });
 
-    sim {
-        clk.generate(100MHz);
-        trace("counter_tb.vcd");
+    clk.generate(100MHz);
+    trace("counter_tb.vcd");
 
-        // Reset the counter
-        rst.pulse(2);
-        assert(count == 0, "Counter should be 0 out of reset");
+    // Reset the counter
+    rst.pulse(2);
+    assert(count == 0, "Counter should be 0 out of reset");
 
-        // Enable count and step 10 cycles
-        en = 1;
-        clk.step(10);
-        assert(count == 10, "Counter should be 10 after 10 enabled cycles");
+    // Enable count and step 10 cycles
+    en = 1;
+    clk.step(10);
+    assert(count == 10, "Counter should be 10 after 10 enabled cycles");
 
-        // Step to near rollover (10 + 245 = 255)
-        clk.step(245);
-        assert(count == 255, "Counter should reach 255");
-        assert(overflow == 1, "Overflow should be active at 255");
+    // Step to near rollover (10 + 245 = 255)
+    clk.step(245);
+    assert(count == 255, "Counter should reach 255");
+    assert(overflow == 1, "Overflow should be active at 255");
 
-        // Step 1 more cycle to wrap to 0
-        clk.step(1);
-        assert(count == 0, "Counter should wrap to 0");
-        assert(overflow == 0, "Overflow should clear after rollover");
-        finish();
-    }
+    // Step 1 more cycle to wrap to 0
+    clk.step(1);
+    assert(count == 0, "Counter should wrap to 0");
+    assert(overflow == 0, "Overflow should clear after rollover");
+    finish();
 }

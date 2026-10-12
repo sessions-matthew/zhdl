@@ -138,6 +138,7 @@ zig build -Doptimize=ReleaseFast
 
 ### Zig-Inspired Type System & Verification
 - **Optional `comb` Blocks & Flat Modules**: Write procedural statements, assignments, and control flow directly at module level without boilerplate `comb { ... }` wrappers.
+- **Optional `sim` Blocks & Flat Testbenches**: Write testbench stimulus, clock generation, reset pulses, stepping, and assertions directly at the top level of `test "name" { ... }` without requiring an explicit `sim { ... }` wrapper.
 - **Race-Condition & Read-Before-Write Prevention**: Static analysis verifies combinational wires are written before read, and unifies all module logic into a single procedural domain to prevent delta-cycle races.
 - **`packed struct`**: Bit-exact hardware layouts, struct literals `.{ ... }`, and member slicing (`s.field`).
 - **`?T` (Hardware Optionals)**: Valid + Data channels with `null` literal, auto-wrapping, and payload capture.

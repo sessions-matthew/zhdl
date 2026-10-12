@@ -2875,6 +2875,134 @@ test "first-class module keyword: pub module Name(W: u32) and pub module Concret
     try runVerilatorLint(std.testing.allocator, sv_code);
 }
 
+test "optional sim block: flat testbench statements with clock gen and step" {
+    const src =
+        \\pub module Inverter {
+        \\    in a: u1,
+        \\    out y: u1,
+        \\    y = ~a;
+        \\}
+        \\
+        \\test "Inverter TB Flat" {
+        \\    wire clk: clock;
+        \\    wire a: u1;
+        \\    wire y: u1;
+        \\
+        \\    const dut = Inverter.instantiate(.{
+        \\        .a = a,
+        \\        .y = y,
+        \\    });
+        \\
+        \\    clk.generate(10ns);
+        \\    a = 0;
+        \\    step(clk, 1);
+        \\    assert(y == 1, "y should be 1 when a is 0");
+        \\    a = 1;
+        \\    step(clk, 1);
+        \\    assert(y == 0, "y should be 0 when a is 1");
+        \\    finish();
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), hir_design.testbenches.len);
+    const tb = hir_design.testbenches[0];
+    try std.testing.expectEqual(@as(usize, 1), tb.clock_gens.len);
+    try std.testing.expectEqualStrings("clk", tb.clock_gens[0].clk_name);
+    try std.testing.expect(tb.sim_stmts.len >= 6);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module tb_Inverter_TB_Flat;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always #5ns clk = ~clk;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "$finish;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "optional sim block: flat testbench with var decl and inline for" {
+    const src =
+        \\pub module Accumulator {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    in inc: u8,
+        \\    out total: u8,
+        \\    reg acc: u8 = 0;
+        \\    acc := acc +% inc;
+        \\    total = acc;
+        \\}
+        \\
+        \\test "Accumulator TB Flat" {
+        \\    wire clk: clock;
+        \\    wire rst: reset;
+        \\    wire inc: u8;
+        \\    wire total: u8;
+        \\
+        \\    const dut = Accumulator.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .inc = inc,
+        \\        .total = total,
+        \\    });
+        \\
+        \\    clk.generate(10);
+        \\    rst.pulse(2);
+        \\    clk.negedge();
+        \\
+        \\    var step_val: u8 = 5;
+        \\    inc = step_val;
+        \\    inline for (0..3) |i| {
+        \\        clk.step(1);
+        \\    }
+        \\    clk.negedge();
+        \\    assert(total == 15, "total should be 15 after 3 cycles of +5");
+        \\    finish();
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), hir_design.testbenches.len);
+    const tb = hir_design.testbenches[0];
+    try std.testing.expectEqual(@as(usize, 1), tb.clock_gens.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module tb_Accumulator_TB_Flat;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+
 
 
 

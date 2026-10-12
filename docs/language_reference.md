@@ -873,7 +873,7 @@ ZHdl provides first-class hardware testbenches matching Zig's `test "name" { ...
 
 ### 11.1 Testbench Structure
 
-A testbench declares test wires, instantiates the Device Under Test (DUT), and executes a procedural `sim` block:
+A testbench declares test wires, instantiates the Device Under Test (DUT), and executes procedural simulation stimulus. The `sim { ... }` wrapper is **optional**—simulation statements (clock generation, reset pulsing, signal driving, stepping, and assertions) can be written flat at the top level of the testbench:
 
 ```zig
 test "Counter increments and rolls over at 255" {
@@ -889,26 +889,24 @@ test "Counter increments and rolls over at 255" {
         .count = count,
     });
 
-    sim {
-        trace("counter_tb.vcd");
-        clk.generate(10);     // 50 MHz clock (10ns period)
-        rst.pulse(2);         // Hold reset for 2 cycles
-        
-        en = 1;
-        step(clk, 10);
-        assert(count == 10, "Counter should reach 10 after 10 enabled cycles");
+    trace("counter_tb.vcd");
+    clk.generate(10);     // 50 MHz clock (10ns period)
+    rst.pulse(2);         // Hold reset for 2 cycles
+    
+    en = 1;
+    step(clk, 10);
+    assert(count == 10, "Counter should reach 10 after 10 enabled cycles");
 
-        step(clk, 246);
-        assert(count == 0, "Counter should roll over to 0 after 256 cycles");
+    step(clk, 246);
+    assert(count == 0, "Counter should roll over to 0 after 256 cycles");
 
-        finish();
-    }
+    finish();
 }
 ```
 
-### 11.2 Simulation Procedures
+### 11.2 Simulation Procedures & Optional `sim` Blocks
 
-Statements inside `sim { ... }` blocks execute sequentially in time.
+Procedural stimulus statements execute sequentially in time. They can be written directly inside the testbench body or grouped into an explicit `sim { ... }` block for scoping or backwards compatibility. In either style, variable declarations (`var step_val: u8 = 5;`), compile-time loops (`inline for (...) |i| { ... }`), and hardware assertions run sequentially.
 
 ### 11.3 Timing and Verification Primitives
 
