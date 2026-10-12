@@ -341,17 +341,18 @@ ZHdl provides three equivalent, clean ways to declare parameterized hardware mod
 
 ### 4.1 Module Definition
 
-Modules are defined as constants assigned to a `module` block:
+Modules are defined using the first-class `pub module` declaration (or as constants assigned to a `module` block):
 
 ```zig
-pub const Counter = module {
+pub module Counter {
     in clk: clock,
     in rst: reset,
     in en: u1,
     out count: u8,
 
-    // Module items (registers, wires, submodules, comb blocks)
-};
+    // Module items (registers, wires, submodules, flat logic)
+}
+// Or constant assignment: pub const Counter = module { ... };
 ```
 
 ### 4.2 Port Declarations (`in`, `out`, `inout`)
@@ -415,7 +416,7 @@ Registers automatically split into:
 ZHdl supports **flat, boilerplate-free module bodies**: dedicated `comb { ... }` wrappers are **completely optional**. Statements, assignments, conditionals, and control flow can be written directly at the module top level:
 
 ```zig
-pub const Counter = module {
+pub module Counter {
     in clk: clock,
     in rst: reset,
     in en: u1,
@@ -428,7 +429,7 @@ pub const Counter = module {
         r_count := r_count +% 1;
     }
     count = r_count;
-};
+}
 ```
 
 For backward compatibility and local lexical scoping, explicit `comb { ... }` blocks and anonymous `{ ... }` blocks are fully supported and lower into the same unified evaluation domain.

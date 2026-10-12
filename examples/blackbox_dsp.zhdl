@@ -16,7 +16,7 @@ pub const XilinxDsp = extern("DSP48E1", .{ .include = "examples/xilinx_dsp48e1.v
     out p: u43,
 };
 
-pub const DspMac = module {
+pub module DspMac {
     in clk: clock,
     in rst: reset,
     in clear: u1,
@@ -38,17 +38,15 @@ pub const DspMac = module {
         },
     );
 
-    comb {
-        if (clear) {
-            accum_q := 0;
-        } else {
-            // Accumulate 43-bit product zero-extended to 48-bit accumulator
-            accum_q := accum_q +% @as(u48, mult_result);
-        }
-
-        accum = accum_q;
+    if (clear) {
+        accum_q := 0;
+    } else {
+        // Accumulate 43-bit product zero-extended to 48-bit accumulator
+        accum_q := accum_q +% @as(u48, mult_result);
     }
-};
+
+    accum = accum_q;
+}
 
 test "DspMac accumulates multiple products" {
     wire clk: clock;
@@ -67,34 +65,32 @@ test "DspMac accumulates multiple products" {
         .accum = accum,
     });
 
-    sim {
-        clk.generate(100MHz);
-        trace("dsp_mac_tb.vcd");
+    clk.generate(100MHz);
+    trace("dsp_mac_tb.vcd");
 
-        rst.pulse(2);
-        clear = 1;
-        data_a = 0;
-        data_b = 0;
-        clk.step();
-        assert(accum == 0, "Accumulator should be cleared");
+    rst.pulse(2);
+    clear = 1;
+    data_a = 0;
+    data_b = 0;
+    clk.step();
+    assert(accum == 0, "Accumulator should be cleared");
 
-        clear = 0;
-        // Cycle 1: present data_a = 10, data_b = 5 -> mult_result = 50
-        data_a = 10;
-        data_b = 5;
-        clk.step();
-        assert(accum == 50, "Accumulator should reach 50");
+    clear = 0;
+    // Cycle 1: present data_a = 10, data_b = 5 -> mult_result = 50
+    data_a = 10;
+    data_b = 5;
+    clk.step();
+    assert(accum == 50, "Accumulator should reach 50");
 
-        // Cycle 2: present data_a = 20, data_b = 3 -> mult_result = 60, accum = 50 + 60 = 110
-        data_a = 20;
-        data_b = 3;
-        clk.step();
-        assert(accum == 110, "Accumulator should reach 110");
+    // Cycle 2: present data_a = 20, data_b = 3 -> mult_result = 60, accum = 50 + 60 = 110
+    data_a = 20;
+    data_b = 3;
+    clk.step();
+    assert(accum == 110, "Accumulator should reach 110");
 
-        // Cycle 3: clear accumulator
-        clear = 1;
-        clk.step();
-        assert(accum == 0, "Accumulator should clear to 0");
-        finish();
-    }
+    // Cycle 3: clear accumulator
+    clear = 1;
+    clk.step();
+    assert(accum == 0, "Accumulator should clear to 0");
+    finish();
 }

@@ -1,5 +1,5 @@
 //! Zero-Latch Finite State Machine with Strict Enums
-pub const FSM = module {
+pub module FSM {
     in clk: clock,
     in rst: reset,
     in start: u1,
@@ -8,40 +8,38 @@ pub const FSM = module {
 
     reg state: u2 = 0;
 
-    comb {
-        // Safe defaults prevent any transparent latch inference
-        busy = 0;
-        done_pulse = 0;
+    // Safe defaults prevent any transparent latch inference
+    busy = 0;
+    done_pulse = 0;
 
-        switch (state) {
-            0 => { // idle
-                busy = 0;
-                done_pulse = 0;
-                if (start) {
-                    state := 1; // goto read
-                }
-            },
-            1 => { // read
-                busy = 1;
-                done_pulse = 0;
-                state := 2; // goto write
-            },
-            2 => { // write
-                busy = 1;
-                done_pulse = 0;
-                state := 3; // goto done
-            },
-            3 => { // done
-                busy = 0;
-                done_pulse = 1;
-                state := 0; // return to idle
-            },
-            else => {
-                state := 0;
-            },
-        }
+    switch (state) {
+        0 => { // idle
+            busy = 0;
+            done_pulse = 0;
+            if (start) {
+                state := 1; // goto read
+            }
+        },
+        1 => { // read
+            busy = 1;
+            done_pulse = 0;
+            state := 2; // goto write
+        },
+        2 => { // write
+            busy = 1;
+            done_pulse = 0;
+            state := 3; // goto done
+        },
+        3 => { // done
+            busy = 0;
+            done_pulse = 1;
+            state := 0; // return to idle
+        },
+        else => {
+            state := 0;
+        },
     }
-};
+}
 
 test "FSM cycles through idle, read, write, and done states" {
     wire clk: clock;
@@ -58,38 +56,36 @@ test "FSM cycles through idle, read, write, and done states" {
         .done_pulse = done_pulse,
     });
 
-    sim {
-        clk.generate(10);
-        trace("fsm_tb.vcd");
+    clk.generate(100MHz);
+    trace("fsm_tb.vcd");
 
-        // Assert reset
-        rst.pulse(2);
-        assert(busy == 0, "FSM should not be busy out of reset");
-        assert(done_pulse == 0, "FSM should not assert done out of reset");
+    // Assert reset
+    rst.pulse(2);
+    assert(busy == 0, "FSM should not be busy out of reset");
+    assert(done_pulse == 0, "FSM should not assert done out of reset");
 
-        // Trigger start pulse
-        start = 1;
-        step(clk, 1);
-        start = 0;
+    // Trigger start pulse
+    start = 1;
+    clk.step(1);
+    start = 0;
 
-        // Cycle 1: state 1 (read) -> busy should be 1
-        assert(busy == 1, "FSM should be busy in state 1");
-        assert(done_pulse == 0, "done should be 0 in state 1");
+    // Cycle 1: state 1 (read) -> busy should be 1
+    assert(busy == 1, "FSM should be busy in state 1");
+    assert(done_pulse == 0, "done should be 0 in state 1");
 
-        // Cycle 2: state 2 (write) -> busy should be 1
-        step(clk, 1);
-        assert(busy == 1, "FSM should be busy in state 2");
-        assert(done_pulse == 0, "done should be 0 in state 2");
+    // Cycle 2: state 2 (write) -> busy should be 1
+    clk.step(1);
+    assert(busy == 1, "FSM should be busy in state 2");
+    assert(done_pulse == 0, "done should be 0 in state 2");
 
-        // Cycle 3: state 3 (done) -> busy should be 0, done_pulse should be 1
-        step(clk, 1);
-        assert(busy == 0, "FSM should not be busy in done state");
-        assert(done_pulse == 1, "done_pulse should be 1 in state 3");
+    // Cycle 3: state 3 (done) -> busy should be 0, done_pulse should be 1
+    clk.step(1);
+    assert(busy == 0, "FSM should not be busy in done state");
+    assert(done_pulse == 1, "done_pulse should be 1 in state 3");
 
-        // Cycle 4: returns to idle
-        step(clk, 1);
-        assert(busy == 0, "FSM should return to idle");
-        assert(done_pulse == 0, "done_pulse should deassert in idle");
-        finish();
-    }
+    // Cycle 4: returns to idle
+    clk.step(1);
+    assert(busy == 0, "FSM should return to idle");
+    assert(done_pulse == 0, "done_pulse should deassert in idle");
+    finish();
 }

@@ -35,7 +35,7 @@ pub const Command = union(enum) {
     idle: void,
 };
 
-pub const PacketFilter = module(comptime W: usize) {
+pub module PacketFilter(comptime W: usize) {
     in clk: clock,
     in rst_n: reset(.low),
     in cmd: Command,
@@ -60,7 +60,7 @@ pub const PacketFilter = module(comptime W: usize) {
             rx_stream = null;
         },
     }
-};
+}
 
 test "PacketFilter processes commands" {
     wire clk: clock;
@@ -205,8 +205,8 @@ switch (cmd) {
 ### 7. Comptime Generics (`module(params)`)
 Parameterized module templates without boilerplate double-nesting:
 ```zig
-pub const Fifo = module(comptime DEPTH: usize, comptime WIDTH: usize) { ... };
-// Or directly using first-class module syntax:
+pub module Fifo(comptime DEPTH: usize, comptime WIDTH: usize) { ... }
+// Or without explicit comptime keyword:
 pub module Counter(WIDTH: usize) { ... }
 ```
 
@@ -291,7 +291,7 @@ The [`examples/`](examples/) directory includes full, self-contained hardware de
 | [`riscv_decoder.zhdl`](examples/riscv_decoder.zhdl) | Complete RV32I instruction decoder and execution unit using `packed struct` with type methods (`isSub()`, `getSignExtendedImm()`, `getLuiVal()`, `getBranchOffset()`), hardware tagged unions `union(enum)`, pattern matching `switch`, and bit-exact sign-extension. |
 | [`skid_buffer.zhdl`](examples/skid_buffer.zhdl) | Zero-bubble elastic pipeline stream buffering with ready/valid backpressure, hardware optionals `?T`, `null` checks, auto-wrapping, and 2-entry internal queueing. |
 | [`async_fifo.zhdl`](examples/async_fifo.zhdl) | Dual asynchronous clock domains (100MHz write, 33MHz read), active-low resets (`reset(.low)`), Gray code pointer conversion, static CDC checking, and safe CDC synchronization via `@sync2ff`. |
-| [`packet_filter.zhdl`](examples/packet_filter.zhdl) | Parameterized generic module `module(comptime W: usize)`, tagged unions `union(enum)`, optional streams `?u(W)`, type methods, and flat testbench simulation. |
+| [`packet_filter.zhdl`](examples/packet_filter.zhdl) | Parameterized generic module `pub module PacketFilter(comptime W: usize)`, tagged unions `union(enum)`, optional streams `?u(W)`, type methods, and flat testbench simulation. |
 | [`ads131m04.zhdl`](examples/ads131m04.zhdl) | Industrial 24-bit 4-channel delta-sigma ADC hardware interface with synchronous SPI framed protocol, DRDY pulse generation, and register control. |
 | [`uart_bridge.zhdl`](examples/uart_bridge.zhdl) | Full-duplex UART receiver/transmitter with start/stop framing, CRC16 verification, byte streaming, and host injection FIFO. |
 | [`am335x_timer.zhdl`](examples/am335x_timer.zhdl) | AM335x SoC 32-bit hardware timer peripheral with OCP register bus interface, compare-match interrupts, prescaler, and soft reset. |

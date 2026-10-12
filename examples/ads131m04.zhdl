@@ -2,7 +2,7 @@
 //! Protocol: SPI Mode 1 (CPOL=0, CPHA=1), 24-bit word size, 6-word (144-bit) frames
 //! Multi-channel loadcell and battery telemetry acquisition model
 
-pub const Ads131m04Model = module {
+pub module Ads131m04Model {
     in clk: clock,
     in rst_n: reset(.low),
 
@@ -60,11 +60,13 @@ pub const Ads131m04Model = module {
     reg cs_n_prev: u1 = 1;
     reg sync_prev: u1 = 1;
 
-    comb {
-        // Safe default assignments prevent any latch inference
-        wire cmd: u16 = 0;
-        wire cmd_addr: u6 = 0;
-        wire wdata_in: u16 = 0;
+    // Procedural command decode wires
+    wire cmd: u16;
+    wire cmd_addr: u6;
+    wire wdata_in: u16;
+    cmd = 0;
+    cmd_addr = 0;
+    wdata_in = 0;
 
         // Status output wiring
         state_out = device_state;
@@ -223,7 +225,6 @@ pub const Ads131m04Model = module {
             }
         }
     }
-};
 
 test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
     wire clk: clock;
@@ -267,58 +268,56 @@ test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
         .total_frames_out = total_frames_out,
     });
 
-    sim {
-        clk.generate(10);
-        trace("ads131m04_tb.vcd");
+    clk.generate(100MHz);
+    trace("ads131m04_tb.vcd");
 
-        sync_n = 1;
-        spi_cs_n = 1;
-        spi_sclk = 0;
-        spi_mosi = 0;
-        sample_rate_div = 10;
-        stim_ch0 = 0x123456;
-        stim_ch1 = 0x234567;
-        stim_ch2 = 0x345678;
-        stim_ch3 = 0x456789;
+    sync_n = 1;
+    spi_cs_n = 1;
+    spi_sclk = 0;
+    spi_mosi = 0;
+    sample_rate_div = 10;
+    stim_ch0 = 0x123456;
+    stim_ch1 = 0x234567;
+    stim_ch2 = 0x345678;
+    stim_ch3 = 0x456789;
 
-        rst_n.pulse(2);
+    rst_n.pulse(2);
 
-        // 1. Initial State Checks
-        assert(state_out == 2, "State should initialize to ST_CONV (2)");
-        assert(reg_clock_out == 0x0F0E, "Default reg_clock should be 0x0F0E");
-        assert(reg_status_out == 0x0501, "Default reg_status should be 0x0501");
-        assert(total_frames_out == 0, "Total frames should be 0 initially");
+    // 1. Initial State Checks
+    assert(state_out == 2, "State should initialize to ST_CONV (2)");
+    assert(reg_clock_out == 0x0F0E, "Default reg_clock should be 0x0F0E");
+    assert(reg_status_out == 0x0501, "Default reg_status should be 0x0501");
+    assert(total_frames_out == 0, "Total frames should be 0 initially");
 
-        // 2. Conversion & DRDY Assertion
-        step(clk, 12);
-        assert(drdy_n == 0, "DRDY should assert low when sample_rate_div counts down");
+    // 2. Conversion & DRDY Assertion
+    clk.step(12);
+    assert(drdy_n == 0, "DRDY should assert low when sample_rate_div counts down");
 
-        // 3. Start SPI Transaction: CS falling edge
-        spi_cs_n = 0;
-        step(clk, 2);
+    // 3. Start SPI Transaction: CS falling edge
+    spi_cs_n = 0;
+    clk.step(2);
 
-        // First SCLK rising edge clears DRDY
-        spi_sclk = 1;
-        step(clk, 2);
-        assert(drdy_n == 1, "DRDY should deassert high on SCLK edge during SPI transaction");
+    // First SCLK rising edge clears DRDY
+    spi_sclk = 1;
+    clk.step(2);
+    assert(drdy_n == 1, "DRDY should deassert high on SCLK edge during SPI transaction");
 
-        spi_sclk = 0;
-        step(clk, 2);
+    spi_sclk = 0;
+    clk.step(2);
 
-        // End SPI Transaction: CS rising edge completes frame
-        spi_cs_n = 1;
-        step(clk, 2);
-        assert(total_frames_out == 1, "Total frames should increment to 1 after CS pulse");
+    // End SPI Transaction: CS rising edge completes frame
+    spi_cs_n = 1;
+    clk.step(2);
+    assert(total_frames_out == 1, "Total frames should increment to 1 after CS pulse");
 
-        // 4. Hardware SYNC pulse reinitialization
-        sync_n = 0;
-        step(clk, 2);
-        sync_n = 1;
-        step(clk, 2);
-        assert(state_out == 2, "Device should return to ST_CONV after SYNC pulse");
-        assert(drdy_n == 0, "DRDY should be asserted out of SYNC pulse");
+    // 4. Hardware SYNC pulse reinitialization
+    sync_n = 0;
+    clk.step(2);
+    sync_n = 1;
+    clk.step(2);
+    assert(state_out == 2, "Device should return to ST_CONV after SYNC pulse");
+    assert(drdy_n == 0, "DRDY should be asserted out of SYNC pulse");
 
-        finish();
-    }
+    finish();
 }
 

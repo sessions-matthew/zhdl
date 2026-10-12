@@ -13,7 +13,7 @@ pub const Command = union(enum) {
     idle: void,
 };
 
-pub const PacketFilter = module(comptime W: usize) {
+pub module PacketFilter(comptime W: usize) {
     in clk: clock,
     in rst_n: reset(.low),
     in cmd: Command,
@@ -38,7 +38,7 @@ pub const PacketFilter = module(comptime W: usize) {
             rx_stream = null;
         },
     }
-};
+}
 
 test "PacketFilter processes commands" {
     wire clk: clock;

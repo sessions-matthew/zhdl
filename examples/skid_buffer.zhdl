@@ -6,7 +6,7 @@
 //! 3. Comptime generic sizing: 'SkidBuffer(comptime W: usize) type'.
 //! 4. Comprehensive testbench with backpressure stalls, burst transfers, and drain assertions.
 
-pub const SkidBuffer = module(comptime W: usize) {
+pub module SkidBuffer(comptime W: usize) {
     in clk: clock,
     in rst_n: reset(.low),
 
@@ -57,7 +57,7 @@ pub const SkidBuffer = module(comptime W: usize) {
             buf_data := s_data;
         }
     }
-};
+}
 
 test "SkidBuffer absorbs backpressure without bubble cycles" {
     wire clk: clock;

@@ -2,7 +2,7 @@
 //! Fully compliant with Texas Instruments AM335x TRM Chapter 20 (SPRUH73)
 //! 32-bit OCP/L4 Bus Slave, Prescaler, Compare/Overflow Match, Interrupt Output
 
-pub const Am335xTimer = module {
+pub module Am335xTimer {
     in clk: clock,
     in rst_n: reset(.low),
 
@@ -32,8 +32,7 @@ pub const Am335xTimer = module {
     reg tsicr: u3 = 0;
     reg prescale_cnt: u8 = 0;
 
-    comb {
-        // Control bits decoded
+    // Control bits decoded
         wire timer_st: u1 = tclr[0];
         wire timer_ar: u1 = tclr[1];
         wire ptv: u3 = tclr[2..5];
@@ -176,7 +175,6 @@ pub const Am335xTimer = module {
             }
         }
     }
-};
 
 test "Am335xTimer OCP bus, compare match IRQ, and soft reset" {
     wire clk: clock;
@@ -204,76 +202,74 @@ test "Am335xTimer OCP bus, compare match IRQ, and soft reset" {
         .irq_out = irq_out,
     });
 
-    sim {
-        clk.generate(10);
-        trace("am335x_timer_tb.vcd");
+    clk.generate(100MHz);
+    trace("am335x_timer_tb.vcd");
 
-        rst_n.pulse(2);
+    rst_n.pulse(2);
 
-        // 1. Read TIDR identification register at 0x00
-        cs = 1;
-        rd_en = 1;
-        addr = 0x00;
-        step(clk, 1);
-        assert(rdy == 1, "Bus ready should assert during read");
-        assert(rdata == 0x40000100, "TIDR should return 0x40000100");
+    // 1. Read TIDR identification register at 0x00
+    cs = 1;
+    rd_en = 1;
+    addr = 0x00;
+    clk.step(1);
+    assert(rdy == 1, "Bus ready should assert during read");
+    assert(rdata == 0x40000100, "TIDR should return 0x40000100");
 
-        // 2. Configure Timer:
-        // Enable Compare Match IRQ in IRQENABLE (0x2C)
-        rd_en = 0;
-        wr_en = 1;
-        addr = 0x2C;
-        wdata = 0x01;
-        step(clk, 1);
+    // 2. Configure Timer:
+    // Enable Compare Match IRQ in IRQENABLE (0x2C)
+    rd_en = 0;
+    wr_en = 1;
+    addr = 0x2C;
+    wdata = 0x01;
+    clk.step(1);
 
-        // Set Compare Register TMAR (0x4C) = 5
-        addr = 0x4C;
-        wdata = 5;
-        step(clk, 1);
+    // Set Compare Register TMAR (0x4C) = 5
+    addr = 0x4C;
+    wdata = 5;
+    clk.step(1);
 
-        // Set Initial Counter TCRR (0x3C) = 0
-        addr = 0x3C;
-        wdata = 0;
-        step(clk, 1);
+    // Set Initial Counter TCRR (0x3C) = 0
+    addr = 0x3C;
+    wdata = 0;
+    clk.step(1);
 
-        // Start Timer with Compare Enable: TCLR (0x38) = 0x41 (CE=1, ST=1)
-        addr = 0x38;
-        wdata = 0x41;
-        step(clk, 1);
+    // Start Timer with Compare Enable: TCLR (0x38) = 0x41 (CE=1, ST=1)
+    addr = 0x38;
+    wdata = 0x41;
+    clk.step(1);
 
-        // Deassert bus signals and let timer run 6 cycles to compare match
-        cs = 0;
-        wr_en = 0;
-        step(clk, 6);
+    // Deassert bus signals and let timer run 6 cycles to compare match
+    cs = 0;
+    wr_en = 0;
+    clk.step(6);
 
-        assert(irq_out == 1, "Interrupt should assert when counter matches TMAR (5)");
+    assert(irq_out == 1, "Interrupt should assert when counter matches TMAR (5)");
 
-        // 3. Clear Interrupt via IRQSTATUS write (0x28)
-        cs = 1;
-        wr_en = 1;
-        addr = 0x28;
-        wdata = 0x01;
-        step(clk, 1);
-        cs = 0;
-        wr_en = 0;
-        step(clk, 1);
-        assert(irq_out == 0, "Interrupt should clear after IRQSTATUS write");
+    // 3. Clear Interrupt via IRQSTATUS write (0x28)
+    cs = 1;
+    wr_en = 1;
+    addr = 0x28;
+    wdata = 0x01;
+    clk.step(1);
+    cs = 0;
+    wr_en = 0;
+    clk.step(1);
+    assert(irq_out == 0, "Interrupt should clear after IRQSTATUS write");
 
-        // 4. Soft Reset via TIOCP_CFG (0x10)
-        cs = 1;
-        wr_en = 1;
-        addr = 0x10;
-        wdata = 0x01;
-        step(clk, 1);
+    // 4. Soft Reset via TIOCP_CFG (0x10)
+    cs = 1;
+    wr_en = 1;
+    addr = 0x10;
+    wdata = 0x01;
+    clk.step(1);
 
-        // Read TCLR (0x38) to confirm timer was stopped and reset
-        wr_en = 0;
-        rd_en = 1;
-        addr = 0x38;
-        step(clk, 1);
-        assert(rdata == 0, "TCLR should be 0 after soft reset");
+    // Read TCLR (0x38) to confirm timer was stopped and reset
+    wr_en = 0;
+    rd_en = 1;
+    addr = 0x38;
+    clk.step(1);
+    assert(rdata == 0, "TCLR should be 0 after soft reset");
 
-        finish();
-    }
+    finish();
 }
 
