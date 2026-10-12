@@ -1,0 +1,269 @@
+//! Framed UART Packet Bridge & Protocol Transceiver
+//! Protocol: SOF (0xAA) | MSG_ID (1B) | LEN (1B) | PAYLOAD (N B) | CRC16 (2B BE)
+//! CRC: CCITT-FALSE (poly 0x1021, init 0xFFFF) over MSG_ID + LEN + PAYLOAD
+
+pub const Crc16Ccitt = module {
+    in current_crc: u16,
+    in data_byte: u8,
+    out next_crc: u16,
+
+    comb {
+        wire c0: u16 = current_crc ^ @concat(data_byte, @as(u8, 0));
+        wire c1: u16 = if (c0[15]) ((c0 << 1) ^ 0x1021) else (c0 << 1);
+        wire c2: u16 = if (c1[15]) ((c1 << 1) ^ 0x1021) else (c1 << 1);
+        wire c3: u16 = if (c2[15]) ((c2 << 1) ^ 0x1021) else (c2 << 1);
+        wire c4: u16 = if (c3[15]) ((c3 << 1) ^ 0x1021) else (c3 << 1);
+        wire c5: u16 = if (c4[15]) ((c4 << 1) ^ 0x1021) else (c4 << 1);
+        wire c6: u16 = if (c5[15]) ((c5 << 1) ^ 0x1021) else (c5 << 1);
+        wire c7: u16 = if (c6[15]) ((c6 << 1) ^ 0x1021) else (c6 << 1);
+        wire c8: u16 = if (c7[15]) ((c7 << 1) ^ 0x1021) else (c7 << 1);
+        next_crc = c8;
+    }
+};
+
+pub const UartBridge = module {
+    in clk: clock,
+    in rst_n: reset,
+
+    // Interface with STM32 LPUART1
+    in tx_byte_valid: u1,
+    in tx_byte: u8,
+
+    out rx_byte_valid: u1,
+    out rx_byte: u8,
+    in rx_byte_ack: u1,
+
+    // Host / Testbench Control Interface
+    in host_inject_valid: u1,
+    in host_inject_byte: u8,
+    out host_rx_fifo_count: u8,
+
+    // Decoded Packet Status Outputs
+    out total_packets_received: u32,
+    out total_bytes_received: u32,
+    out last_msg_id: u8,
+    out last_msg_len: u8,
+    out last_crc_valid: u1,
+    out packet_received_pulse: u1,
+    out last_payload: [256]u8,
+
+    // Submodule instantiation for CRC calculation
+    wire crc_step_out: u16;
+    const crc_unit = Crc16Ccitt.instantiate(.{
+        .current_crc = calc_crc,
+        .data_byte = tx_byte,
+        .next_crc = crc_step_out,
+    });
+
+    // Receiver State Machine Registers
+    reg rx_state: u3 = 0;
+    reg cur_msg_id: u8 = 0;
+    reg cur_len: u8 = 0;
+    reg payload_idx: u8 = 0;
+    reg calc_crc: u16 = 0xFFFF;
+    reg received_crc_hi: u8 = 0;
+
+    reg r_total_packets: u32 = 0;
+    reg r_total_bytes: u32 = 0;
+    reg r_last_msg_id: u8 = 0;
+    reg r_last_msg_len: u8 = 0;
+    reg r_last_crc_valid: u1 = 0;
+    reg r_packet_pulse: u1 = 0;
+    reg r_last_payload: [256]u8 = 0;
+
+    // Host Injection FIFO Registers (64 bytes)
+    reg fifo_mem: [64]u8 = 0;
+    reg fifo_rd_ptr: u6 = 0;
+    reg fifo_wr_ptr: u6 = 0;
+    reg fifo_count: u7 = 0;
+
+    comb {
+        // Safe default assignments prevent any latch inference
+        wire expected_crc: u16 = 0;
+
+        // Output wiring
+        host_rx_fifo_count = @concat(@as(u1, 0), fifo_count);
+        rx_byte_valid = (fifo_count > 0);
+        rx_byte = fifo_mem[fifo_rd_ptr];
+
+        total_packets_received = r_total_packets;
+        total_bytes_received = r_total_bytes;
+        last_msg_id = r_last_msg_id;
+        last_msg_len = r_last_msg_len;
+        last_crc_valid = r_last_crc_valid;
+        packet_received_pulse = r_packet_pulse;
+        last_payload = r_last_payload;
+
+        // Auto-clearing pulse
+        r_packet_pulse := 0;
+
+        // Host FIFO write
+        if (host_inject_valid && (fifo_count < 64)) {
+            fifo_mem[fifo_wr_ptr] := host_inject_byte;
+            fifo_wr_ptr := fifo_wr_ptr +% 1;
+            fifo_count := fifo_count +% 1;
+        }
+
+        // STM32 FIFO read acknowledge
+        if (rx_byte_ack && (fifo_count > 0)) {
+            fifo_rd_ptr := fifo_rd_ptr +% 1;
+            fifo_count := fifo_count -% 1;
+        }
+
+        // Framing receiver from STM32 TX
+        if (tx_byte_valid) {
+            r_total_bytes := r_total_bytes +% 1;
+
+            switch (rx_state) {
+                0 => { // ST_IDLE
+                    if (tx_byte == 0xAA) { // SOF
+                        rx_state := 1;
+                        calc_crc := 0xFFFF;
+                    }
+                },
+                1 => { // ST_MSG_ID
+                    cur_msg_id := tx_byte;
+                    calc_crc := crc_step_out;
+                    rx_state := 2;
+                },
+                2 => { // ST_LEN
+                    cur_len := tx_byte;
+                    calc_crc := crc_step_out;
+                    payload_idx := 0;
+                    if (tx_byte == 0) {
+                        rx_state := 4; // Skip to CRC_HI
+                    } else {
+                        rx_state := 3; // To PAYLOAD
+                    }
+                },
+                3 => { // ST_PAYLOAD
+                    r_last_payload[payload_idx] := tx_byte;
+                    calc_crc := crc_step_out;
+                    payload_idx := payload_idx +% 1;
+                    if ((payload_idx +% 1) >= cur_len) {
+                        rx_state := 4; // To CRC_HI
+                    }
+                },
+                4 => { // ST_CRC_HI
+                    received_crc_hi := tx_byte;
+                    rx_state := 5;
+                },
+                5 => { // ST_CRC_LO
+                    expected_crc = @concat(received_crc_hi, tx_byte);
+                    r_last_msg_id := cur_msg_id;
+                    r_last_msg_len := cur_len;
+
+                    if (expected_crc == calc_crc) {
+                        r_last_crc_valid := 1;
+                        r_total_packets := r_total_packets +% 1;
+                        r_packet_pulse := 1;
+                    } else {
+                        r_last_crc_valid := 0;
+                    }
+
+                    rx_state := 0; // Return to IDLE
+                },
+                else => {
+                    rx_state := 0;
+                },
+            }
+        }
+    }
+};
+
+test "UartBridge framing, CRC16 verification, and host injection FIFO" {
+    wire clk: clock;
+    wire rst_n: reset;
+
+    wire tx_byte_valid: u1;
+    wire tx_byte: u8;
+
+    wire rx_byte_valid: u1;
+    wire rx_byte: u8;
+    wire rx_byte_ack: u1;
+
+    wire host_inject_valid: u1;
+    wire host_inject_byte: u8;
+    wire host_rx_fifo_count: u8;
+
+    wire total_packets_received: u32;
+    wire total_bytes_received: u32;
+    wire last_msg_id: u8;
+    wire last_msg_len: u8;
+    wire last_crc_valid: u1;
+    wire packet_received_pulse: u1;
+    wire last_payload: [256]u8;
+
+    const dut = UartBridge.instantiate(.{
+        .clk = clk,
+        .rst_n = rst_n,
+        .tx_byte_valid = tx_byte_valid,
+        .tx_byte = tx_byte,
+        .rx_byte_valid = rx_byte_valid,
+        .rx_byte = rx_byte,
+        .rx_byte_ack = rx_byte_ack,
+        .host_inject_valid = host_inject_valid,
+        .host_inject_byte = host_inject_byte,
+        .host_rx_fifo_count = host_rx_fifo_count,
+        .total_packets_received = total_packets_received,
+        .total_bytes_received = total_bytes_received,
+        .last_msg_id = last_msg_id,
+        .last_msg_len = last_msg_len,
+        .last_crc_valid = last_crc_valid,
+        .packet_received_pulse = packet_received_pulse,
+        .last_payload = last_payload,
+    });
+
+    sim {
+        clk.generate(10);
+        trace("uart_bridge_tb.vcd");
+
+        rst_n.pulse(2);
+        assert(total_packets_received == 0, "Packets count should start at 0");
+        assert(total_bytes_received == 0, "Bytes count should start at 0");
+
+        // 1. Host injection FIFO test
+        host_inject_valid = 1;
+        host_inject_byte = 0xA5;
+        step(clk, 1);
+        host_inject_valid = 0;
+        assert(host_rx_fifo_count == 1, "FIFO count should be 1 after injection");
+        assert(rx_byte_valid == 1, "rx_byte_valid should be high");
+        assert(rx_byte == 0xA5, "rx_byte should match injected byte 0xA5");
+
+        rx_byte_ack = 1;
+        step(clk, 1);
+        rx_byte_ack = 0;
+        assert(host_rx_fifo_count == 0, "FIFO count should return to 0 after ACK");
+        assert(rx_byte_valid == 0, "rx_byte_valid should deassert when FIFO is empty");
+
+        // 2. Framed packet transmission:
+        // SOF (0xAA) | MSG_ID (0x42) | LEN (0x02) | PAYLOAD (0xDE, 0xAD) | CRC16 (0x3B, 0x3B)
+        tx_byte_valid = 1;
+        tx_byte = 0xAA; // SOF
+        step(clk, 1);
+        tx_byte = 0x42; // MSG_ID
+        step(clk, 1);
+        tx_byte = 0x02; // LEN
+        step(clk, 1);
+        tx_byte = 0xDE; // Payload byte 0
+        step(clk, 1);
+        tx_byte = 0xAD; // Payload byte 1
+        step(clk, 1);
+        tx_byte = 0x3B; // CRC High
+        step(clk, 1);
+        tx_byte = 0x3B; // CRC Low
+        step(clk, 1);
+
+        tx_byte_valid = 0;
+        step(clk, 1);
+
+        assert(total_packets_received == 1, "Should have received 1 valid packet");
+        assert(last_msg_id == 0x42, "MSG_ID should be 0x42");
+        assert(last_msg_len == 2, "LEN should be 2");
+        assert(last_crc_valid == 1, "CRC should be verified valid");
+
+        finish();
+    }
+}
+

@@ -1,0 +1,124 @@
+//! Synchronous FIFO with Submodule Hierarchy and Full/Empty Flag Generation
+
+pub const FifoPointer = module {
+    in clk: clock,
+    in rst: reset,
+    in inc: u1,
+    out ptr: u4,
+
+    reg r_ptr: u4 = 0;
+
+    comb {
+        if (inc) {
+            r_ptr := r_ptr +% 1;
+        }
+        ptr = r_ptr;
+    }
+};
+
+pub const SyncFifo = module {
+    in clk: clock,
+    in rst: reset,
+    in wr_en: u1,
+    in rd_en: u1,
+    in din: u8,
+    out dout: u8,
+    out empty: u1,
+    out full: u1,
+    out wr_ptr: u4,
+    out rd_ptr: u4,
+
+    // Submodule instantiation with named port binding
+    const wr_unit = FifoPointer.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .inc = wr_en,
+        .ptr = wr_ptr,
+    });
+
+    const rd_unit = FifoPointer.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .inc = rd_en,
+        .ptr = rd_ptr,
+    });
+
+    reg count_reg: u5 = 0;
+
+    comb {
+        empty = (count_reg == 0);
+        full  = (count_reg == 16);
+
+        if (wr_en && !rd_en) {
+            count_reg := count_reg +% 1;
+        } else if (!wr_en && rd_en) {
+            count_reg := count_reg -% 1;
+        }
+
+        dout = din;
+    }
+};
+
+test "SyncFifo write, read, full, and empty flags" {
+    wire clk: clock;
+    wire rst: reset;
+    wire wr_en: u1;
+    wire rd_en: u1;
+    wire din: u8;
+    wire dout: u8;
+    wire empty: u1;
+    wire full: u1;
+    wire wr_ptr: u4;
+    wire rd_ptr: u4;
+
+    const dut = SyncFifo.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .wr_en = wr_en,
+        .rd_en = rd_en,
+        .din = din,
+        .dout = dout,
+        .empty = empty,
+        .full = full,
+        .wr_ptr = wr_ptr,
+        .rd_ptr = rd_ptr,
+    });
+
+    sim {
+        clk.generate(10);
+        trace("fifo_tb.vcd");
+
+        rst.pulse(2);
+        assert(empty == 1, "FIFO should be empty after reset");
+        assert(full == 0, "FIFO should not be full after reset");
+        assert(wr_ptr == 0, "wr_ptr should be 0 out of reset");
+        assert(rd_ptr == 0, "rd_ptr should be 0 out of reset");
+
+        // Write 1 byte
+        wr_en = 1;
+        din = 0x42;
+        step(clk, 1);
+        wr_en = 0;
+        assert(empty == 0, "FIFO should not be empty after write");
+        assert(wr_ptr == 1, "wr_ptr should advance to 1");
+
+        // Fill remaining 15 slots (total 16 writes)
+        wr_en = 1;
+        step(clk, 15);
+        wr_en = 0;
+        assert(full == 1, "FIFO should be full after 16 writes");
+        assert(empty == 0, "FIFO should not be empty when full");
+
+        // Read all 16 items
+        rd_en = 1;
+        step(clk, 16);
+        rd_en = 0;
+        assert(empty == 1, "FIFO should be empty after reading all items");
+        assert(full == 0, "FIFO should not be full when empty");
+        assert(wr_ptr == 0, "wr_ptr should wrap to 0");
+        assert(rd_ptr == 0, "rd_ptr should wrap to 0");
+
+        finish();
+    }
+}
+

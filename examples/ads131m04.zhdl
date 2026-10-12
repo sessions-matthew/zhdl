@@ -1,0 +1,324 @@
+//! ADS131M04 24-bit 4-Channel Simultaneous-Sampling Delta-Sigma ADC Model
+//! Protocol: SPI Mode 1 (CPOL=0, CPHA=1), 24-bit word size, 6-word (144-bit) frames
+//! Multi-channel loadcell and battery telemetry acquisition model
+
+pub const Ads131m04Model = module {
+    in clk: clock,
+    in rst_n: reset,
+
+    // Physical SPI Bus
+    in spi_cs_n: u1,
+    in spi_sclk: u1,
+    in spi_mosi: u1,
+    out spi_miso: u1,
+    out drdy_n: u1,
+    in sync_n: u1,
+
+    // Simulation stimulus / waveform control
+    in sample_rate_div: u32,
+    in stim_ch0: u24,
+    in stim_ch1: u24,
+    in stim_ch2: u24,
+    in stim_ch3: u24,
+
+    // Status outputs for testbench verification
+    out reg_clock_out: u16,
+    out reg_status_out: u16,
+    out state_out: u3,
+    out total_frames_out: u32,
+
+    // Internal Registers (16-bit)
+    reg device_state: u3 = 2; // ST_CONV = 2
+    reg reg_id: u16 = 0x2404;
+    reg reg_status: u16 = 0x0501;
+    reg reg_mode: u16 = 0x0510;
+    reg reg_clock: u16 = 0x0F0E;
+    reg reg_gain: u16 = 0;
+    reg reg_cfg: u16 = 0x0600;
+    reg reg_ch0_cfg: u16 = 0;
+    reg reg_ch1_cfg: u16 = 0;
+    reg reg_ch2_cfg: u16 = 0;
+    reg reg_ch3_cfg: u16 = 0;
+
+    // RREG response pipeline
+    reg rreg_pending: u1 = 0;
+    reg rreg_data: u16 = 0;
+
+    // Frame Buffers (6 words * 24 bits = 144 bits per frame)
+    reg tx_frame_shift: u144 = 0;
+    reg rx_frame_shift: u144 = 0;
+    reg bit_counter: u8 = 0;
+
+    // DRDY Generator Counter & Shift State
+    reg drdy_counter: u32 = 0;
+    reg drdy_asserted: u1 = 1;
+    reg r_spi_miso: u1 = 0;
+    reg total_frames: u32 = 0;
+
+    // Edge Detection Registers
+    reg sclk_prev: u1 = 0;
+    reg cs_n_prev: u1 = 1;
+    reg sync_prev: u1 = 1;
+
+    comb {
+        // Safe default assignments prevent any latch inference
+        wire cmd: u16 = 0;
+        wire cmd_addr: u6 = 0;
+        wire wdata_in: u16 = 0;
+
+        // Status output wiring
+        state_out = device_state;
+        reg_clock_out = reg_clock;
+        reg_status_out = reg_status;
+        total_frames_out = total_frames;
+        drdy_n = !drdy_asserted;
+        spi_miso = r_spi_miso;
+
+        // Edge detection wires
+        wire sclk_rising: u1 = (spi_sclk && !sclk_prev);
+        wire sclk_falling: u1 = (!spi_sclk && sclk_prev);
+        wire cs_falling: u1 = (!spi_cs_n && cs_n_prev);
+        wire cs_rising: u1 = (spi_cs_n && !cs_n_prev);
+        wire sync_falling: u1 = (!sync_n && sync_prev);
+
+        // Previous pin tracking
+        sync_prev := sync_n;
+        sclk_prev := spi_sclk;
+        cs_n_prev := spi_cs_n;
+
+        // Assemble the next 6-word 24-bit frame to transmit out MISO
+        wire w0: u24 = if (rreg_pending) @concat(rreg_data, @as(u8, 0)) else @concat(reg_status, @as(u8, 0));
+        wire next_tx_frame: u144 = @concat(w0, stim_ch0, stim_ch1, stim_ch2, stim_ch3, @as(u24, 0));
+
+        // Hardware SYNC / RESET pin
+        if (sync_falling || (!sync_n)) {
+            device_state := 2; // ST_CONV
+            reg_id := 0x2404;
+            reg_status := 0x0501;
+            reg_mode := 0x0510;
+            reg_clock := 0x0F0E;
+            reg_gain := 0;
+            reg_cfg := 0x0600;
+            reg_ch0_cfg := 0;
+            reg_ch1_cfg := 0;
+            reg_ch2_cfg := 0;
+            reg_ch3_cfg := 0;
+            rreg_pending := 0;
+            rreg_data := 0;
+            drdy_counter := 0;
+            drdy_asserted := 1;
+        } else {
+            // DRDY Generation: Periodic conversions in ST_CONV state
+            if ((device_state == 2) && (sample_rate_div > 0)) {
+                if (drdy_counter >= sample_rate_div) {
+                    drdy_counter := 0;
+                    drdy_asserted := 1;
+                } else {
+                    drdy_counter := drdy_counter +% 1;
+                }
+            } else {
+                drdy_counter := 0;
+            }
+        }
+
+        // When CS asserts: load the next frame to shift out
+        if (cs_falling) {
+            tx_frame_shift := next_tx_frame;
+            bit_counter := 0;
+            r_spi_miso := 0;
+        }
+
+        // SPI Shift Engine (CPOL=0, CPHA=1):
+        // Data is captured by master on SCLK falling, shifted by slave on SCLK rising
+        if (!spi_cs_n) {
+            if (sclk_rising || sclk_falling) {
+                drdy_asserted := 0;
+            }
+
+            if (sclk_rising) {
+                r_spi_miso := tx_frame_shift[143];
+                tx_frame_shift := @concat(tx_frame_shift[0..143], @as(u1, 0));
+            }
+
+            if (sclk_falling) {
+                rx_frame_shift := @concat(rx_frame_shift[0..143], spi_mosi);
+                bit_counter := bit_counter +% 1;
+            }
+        }
+
+        // When CS deasserts (rising edge): frame is complete
+        if (cs_rising) {
+            r_spi_miso := 0;
+            total_frames := total_frames +% 1;
+
+            if (bit_counter >= 24) {
+                cmd = rx_frame_shift[128..144];
+                cmd_addr = cmd[7..13];
+                wdata_in = rx_frame_shift[104..120];
+
+                rreg_pending := 0;
+
+                if (cmd == 0x0011) {
+                    // CMD_RESET
+                    device_state := 2;
+                    reg_id := 0x2404;
+                    reg_status := 0x0501;
+                    reg_mode := 0x0510;
+                    reg_clock := 0x0F0E;
+                    reg_gain := 0;
+                    reg_cfg := 0x0600;
+                    reg_ch0_cfg := 0;
+                    reg_ch1_cfg := 0;
+                    reg_ch2_cfg := 0;
+                    reg_ch3_cfg := 0;
+                    rreg_pending := 0;
+                    rreg_data := 0;
+                    drdy_asserted := 1;
+                } else if (cmd == 0x0022) {
+                    // CMD_STANDBY
+                    device_state := 1;
+                    reg_status := reg_status & ~@as(u16, 1);
+                } else if (cmd == 0x0033) {
+                    // CMD_WAKEUP
+                    device_state := 2;
+                } else if ((cmd & 0xE000) == 0xA000) {
+                    // RREG command
+                    rreg_pending := 1;
+                    switch (cmd_addr) {
+                        0x00 => { rreg_data := reg_id; },
+                        0x01 => {
+                            rreg_data := reg_status;
+                            reg_status := reg_status & ~@as(u16, 1);
+                        },
+                        0x02 => { rreg_data := reg_mode; },
+                        0x03 => { rreg_data := reg_clock; },
+                        0x04 => { rreg_data := reg_gain; },
+                        0x06 => { rreg_data := reg_cfg; },
+                        0x09 => { rreg_data := reg_ch0_cfg; },
+                        0x0A => { rreg_data := reg_ch1_cfg; },
+                        0x0B => { rreg_data := reg_ch2_cfg; },
+                        0x0C => { rreg_data := reg_ch3_cfg; },
+                        else => { rreg_data := 0; },
+                    }
+                } else if (((cmd & 0xE000) == 0x4000) || ((cmd & 0xE000) == 0x6000)) {
+                    // WREG command
+                    switch (cmd_addr) {
+                        0x02 => { reg_mode := wdata_in; },
+                        0x03 => { reg_clock := wdata_in; },
+                        0x04 => { reg_gain := wdata_in; },
+                        0x06 => { reg_cfg := wdata_in; },
+                        0x09 => { reg_ch0_cfg := wdata_in; },
+                        0x0A => { reg_ch1_cfg := wdata_in; },
+                        0x0B => { reg_ch2_cfg := wdata_in; },
+                        0x0C => { reg_ch3_cfg := wdata_in; },
+                        else => {},
+                    }
+                }
+            }
+
+            if ((device_state == 2) && (rx_frame_shift[128..144] != 0x0022)) {
+                drdy_asserted := 1;
+            } else if (rx_frame_shift[128..144] == 0x0022) {
+                drdy_asserted := 0;
+            }
+        }
+    }
+};
+
+test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
+    wire clk: clock;
+    wire rst_n: reset;
+
+    wire spi_cs_n: u1;
+    wire spi_sclk: u1;
+    wire spi_mosi: u1;
+    wire spi_miso: u1;
+    wire drdy_n: u1;
+    wire sync_n: u1;
+
+    wire sample_rate_div: u32;
+    wire stim_ch0: u24;
+    wire stim_ch1: u24;
+    wire stim_ch2: u24;
+    wire stim_ch3: u24;
+
+    wire reg_clock_out: u16;
+    wire reg_status_out: u16;
+    wire state_out: u3;
+    wire total_frames_out: u32;
+
+    const dut = Ads131m04Model.instantiate(.{
+        .clk = clk,
+        .rst_n = rst_n,
+        .spi_cs_n = spi_cs_n,
+        .spi_sclk = spi_sclk,
+        .spi_mosi = spi_mosi,
+        .spi_miso = spi_miso,
+        .drdy_n = drdy_n,
+        .sync_n = sync_n,
+        .sample_rate_div = sample_rate_div,
+        .stim_ch0 = stim_ch0,
+        .stim_ch1 = stim_ch1,
+        .stim_ch2 = stim_ch2,
+        .stim_ch3 = stim_ch3,
+        .reg_clock_out = reg_clock_out,
+        .reg_status_out = reg_status_out,
+        .state_out = state_out,
+        .total_frames_out = total_frames_out,
+    });
+
+    sim {
+        clk.generate(10);
+        trace("ads131m04_tb.vcd");
+
+        sync_n = 1;
+        spi_cs_n = 1;
+        spi_sclk = 0;
+        spi_mosi = 0;
+        sample_rate_div = 10;
+        stim_ch0 = 0x123456;
+        stim_ch1 = 0x234567;
+        stim_ch2 = 0x345678;
+        stim_ch3 = 0x456789;
+
+        rst_n.pulse(2);
+
+        // 1. Initial State Checks
+        assert(state_out == 2, "State should initialize to ST_CONV (2)");
+        assert(reg_clock_out == 0x0F0E, "Default reg_clock should be 0x0F0E");
+        assert(reg_status_out == 0x0501, "Default reg_status should be 0x0501");
+        assert(total_frames_out == 0, "Total frames should be 0 initially");
+
+        // 2. Conversion & DRDY Assertion
+        step(clk, 12);
+        assert(drdy_n == 0, "DRDY should assert low when sample_rate_div counts down");
+
+        // 3. Start SPI Transaction: CS falling edge
+        spi_cs_n = 0;
+        step(clk, 2);
+
+        // First SCLK rising edge clears DRDY
+        spi_sclk = 1;
+        step(clk, 2);
+        assert(drdy_n == 1, "DRDY should deassert high on SCLK edge during SPI transaction");
+
+        spi_sclk = 0;
+        step(clk, 2);
+
+        // End SPI Transaction: CS rising edge completes frame
+        spi_cs_n = 1;
+        step(clk, 2);
+        assert(total_frames_out == 1, "Total frames should increment to 1 after CS pulse");
+
+        // 4. Hardware SYNC pulse reinitialization
+        sync_n = 0;
+        step(clk, 2);
+        sync_n = 1;
+        step(clk, 2);
+        assert(state_out == 2, "Device should return to ST_CONV after SYNC pulse");
+        assert(drdy_n == 0, "DRDY should be asserted out of SYNC pulse");
+
+        finish();
+    }
+}
+

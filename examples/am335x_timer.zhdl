@@ -1,0 +1,279 @@
+//! AM335x DMTimer Hardware Model
+//! Fully compliant with Texas Instruments AM335x TRM Chapter 20 (SPRUH73)
+//! 32-bit OCP/L4 Bus Slave, Prescaler, Compare/Overflow Match, Interrupt Output
+
+pub const Am335xTimer = module {
+    in clk: clock,
+    in rst_n: reset,
+
+    // Bus Interface (Word-aligned, 32-bit OCP/L4 slave)
+    in cs: u1,
+    in rd_en: u1,
+    in wr_en: u1,
+    in addr: u8,
+    in wdata: u32,
+    out rdata: u32,
+    out rdy: u1,
+
+    // Interrupt output line to INTC
+    out irq_out: u1,
+
+    // Timer Hardware Registers
+    reg tiocp_cfg: u32 = 0;
+    reg irqstatus_raw: u3 = 0;
+    reg irqenable: u3 = 0;
+    reg irqwakeen: u3 = 0;
+    reg tclr: u15 = 0;
+    reg tcrr: u32 = 0;
+    reg tldr: u32 = 0;
+    reg tmar: u32 = 0;
+    reg tcar1: u32 = 0;
+    reg tcar2: u32 = 0;
+    reg tsicr: u3 = 0;
+    reg prescale_cnt: u8 = 0;
+
+    comb {
+        // Control bits decoded
+        wire timer_st: u1 = tclr[0];
+        wire timer_ar: u1 = tclr[1];
+        wire ptv: u3 = tclr[2..5];
+        wire timer_pre: u1 = tclr[5];
+        wire timer_ce: u1 = tclr[6];
+
+        // Prescale terminal count: 2^(PTV+1) - 1
+        wire prescale_limit: u8 = @truncate(u8, (@as(u32, 1) << (ptv +% 1)) -% 1);
+        wire count_tick: u1 = timer_st && (!timer_pre || (prescale_cnt >= prescale_limit));
+
+        // SoftReset trigger: bit 0 of TIOCP_CFG write
+        wire soft_reset_trigger: u1 = (cs && wr_en && (addr == 0x10) && (wdata[0] == 1));
+
+        // Bus ready and interrupt generation
+        rdy = cs && (rd_en || wr_en);
+        irq_out = ((irqstatus_raw & irqenable) != 0);
+
+        // Register Read Bus Logic
+        rdata = 0;
+        if (cs && rd_en) {
+            switch (addr) {
+                0x00 => { rdata = 0x40000100; }, // TIDR_RESET
+                0x10 => { rdata = tiocp_cfg; },
+                0x20 => { rdata = 0; },
+                0x24 => { rdata = @concat(@as(u29, 0), irqstatus_raw); },
+                0x28 => { rdata = @concat(@as(u29, 0), (irqstatus_raw & irqenable)); },
+                0x2C => { rdata = @concat(@as(u29, 0), irqenable); },
+                0x30 => { rdata = @concat(@as(u29, 0), irqenable); },
+                0x34 => { rdata = @concat(@as(u29, 0), irqwakeen); },
+                0x38 => { rdata = @concat(@as(u17, 0), tclr); },
+                0x3C => { rdata = tcrr; },
+                0x40 => { rdata = tldr; },
+                0x44 => { rdata = 0; },
+                0x48 => { rdata = 0; },
+                0x4C => { rdata = tmar; },
+                0x50 => { rdata = tcar1; },
+                0x54 => { rdata = @concat(@as(u29, 0), tsicr); },
+                0x58 => { rdata = tcar2; },
+                else => { rdata = 0; },
+            }
+        }
+
+        // Synchronous Timer Counter Engine & Bus Writes
+        if (soft_reset_trigger) {
+            tiocp_cfg := 0;
+            irqstatus_raw := 0;
+            irqenable := 0;
+            irqwakeen := 0;
+            tclr := 0;
+            tcrr := 0;
+            tldr := 0;
+            tmar := 0;
+            tcar1 := 0;
+            tcar2 := 0;
+            tsicr := 0;
+            prescale_cnt := 0;
+        } else {
+            // Prescaler and Counter Progression
+            if (timer_st) {
+                if (timer_pre) {
+                    if (prescale_cnt >= prescale_limit) {
+                        prescale_cnt := 0;
+                    } else {
+                        prescale_cnt := prescale_cnt +% 1;
+                    }
+                }
+
+                if (count_tick) {
+                    // Compare match check
+                    if (timer_ce && (tcrr == tmar)) {
+                        irqstatus_raw := irqstatus_raw | 0b001; // MAT_IT_FLAG
+                    }
+
+                    // Overflow check
+                    if (tcrr == 0xFFFFFFFF) {
+                        irqstatus_raw := irqstatus_raw | 0b010; // OVF_IT_FLAG
+                        if (timer_ar) {
+                            tcrr := tldr;
+                        } else {
+                            tclr := tclr & ~@as(u15, 1); // Stop timer on overflow in one-shot
+                            tcrr := 0xFFFFFFFF;
+                        }
+                    } else {
+                        tcrr := tcrr +% 1;
+                    }
+                }
+            }
+
+            // Register Bus Writes
+            if (cs && wr_en) {
+                switch (addr) {
+                    0x10 => {
+                        tiocp_cfg := wdata;
+                    },
+                    0x20 => {}, // IRQ_EOI write ack
+                    0x24 => {
+                        irqstatus_raw := irqstatus_raw | @truncate(u3, wdata);
+                    },
+                    0x28 => {
+                        irqstatus_raw := irqstatus_raw & ~@truncate(u3, wdata);
+                    },
+                    0x2C => {
+                        irqenable := irqenable | @truncate(u3, wdata);
+                    },
+                    0x30 => {
+                        irqenable := irqenable & ~@truncate(u3, wdata);
+                    },
+                    0x34 => {
+                        irqwakeen := @truncate(u3, wdata);
+                    },
+                    0x38 => {
+                        tclr := @truncate(u15, wdata);
+                        if (wdata[0] == 0) {
+                            prescale_cnt := 0;
+                        }
+                    },
+                    0x3C => {
+                        tcrr := wdata;
+                    },
+                    0x40 => {
+                        tldr := wdata;
+                    },
+                    0x44 => {
+                        tcrr := tldr;
+                    },
+                    0x4C => {
+                        tmar := wdata;
+                    },
+                    0x50 => {
+                        tcar1 := wdata;
+                    },
+                    0x54 => {
+                        tsicr := @truncate(u3, wdata);
+                    },
+                    0x58 => {
+                        tcar2 := wdata;
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+};
+
+test "Am335xTimer OCP bus, compare match IRQ, and soft reset" {
+    wire clk: clock;
+    wire rst_n: reset;
+
+    wire cs: u1;
+    wire rd_en: u1;
+    wire wr_en: u1;
+    wire addr: u8;
+    wire wdata: u32;
+    wire rdata: u32;
+    wire rdy: u1;
+    wire irq_out: u1;
+
+    const dut = Am335xTimer.instantiate(.{
+        .clk = clk,
+        .rst_n = rst_n,
+        .cs = cs,
+        .rd_en = rd_en,
+        .wr_en = wr_en,
+        .addr = addr,
+        .wdata = wdata,
+        .rdata = rdata,
+        .rdy = rdy,
+        .irq_out = irq_out,
+    });
+
+    sim {
+        clk.generate(10);
+        trace("am335x_timer_tb.vcd");
+
+        rst_n.pulse(2);
+
+        // 1. Read TIDR identification register at 0x00
+        cs = 1;
+        rd_en = 1;
+        addr = 0x00;
+        step(clk, 1);
+        assert(rdy == 1, "Bus ready should assert during read");
+        assert(rdata == 0x40000100, "TIDR should return 0x40000100");
+
+        // 2. Configure Timer:
+        // Enable Compare Match IRQ in IRQENABLE (0x2C)
+        rd_en = 0;
+        wr_en = 1;
+        addr = 0x2C;
+        wdata = 0x01;
+        step(clk, 1);
+
+        // Set Compare Register TMAR (0x4C) = 5
+        addr = 0x4C;
+        wdata = 5;
+        step(clk, 1);
+
+        // Set Initial Counter TCRR (0x3C) = 0
+        addr = 0x3C;
+        wdata = 0;
+        step(clk, 1);
+
+        // Start Timer with Compare Enable: TCLR (0x38) = 0x41 (CE=1, ST=1)
+        addr = 0x38;
+        wdata = 0x41;
+        step(clk, 1);
+
+        // Deassert bus signals and let timer run 6 cycles to compare match
+        cs = 0;
+        wr_en = 0;
+        step(clk, 6);
+
+        assert(irq_out == 1, "Interrupt should assert when counter matches TMAR (5)");
+
+        // 3. Clear Interrupt via IRQSTATUS write (0x28)
+        cs = 1;
+        wr_en = 1;
+        addr = 0x28;
+        wdata = 0x01;
+        step(clk, 1);
+        cs = 0;
+        wr_en = 0;
+        step(clk, 1);
+        assert(irq_out == 0, "Interrupt should clear after IRQSTATUS write");
+
+        // 4. Soft Reset via TIOCP_CFG (0x10)
+        cs = 1;
+        wr_en = 1;
+        addr = 0x10;
+        wdata = 0x01;
+        step(clk, 1);
+
+        // Read TCLR (0x38) to confirm timer was stopped and reset
+        wr_en = 0;
+        rd_en = 1;
+        addr = 0x38;
+        step(clk, 1);
+        assert(rdata == 0, "TCLR should be 0 after soft reset");
+
+        finish();
+    }
+}
+

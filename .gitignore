@@ -1,0 +1,6 @@
+.zig-cache/
+zig-out/
+zhdl
+*.sv
+.zhdl_sim/
+*.vcd

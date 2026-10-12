@@ -1,0 +1,286 @@
+const std = @import("std");
+const token = @import("token.zig");
+const TokenType = token.TokenType;
+const SourceLoc = token.SourceLoc;
+
+pub const PortDir = enum {
+    in,
+    out,
+    inout,
+};
+
+pub const TypeTag = enum {
+    named,
+    int, // u8, u1, u(W), i16
+    enum_type,
+    packed_struct,
+    array,
+};
+
+pub const EnumField = struct {
+    name: []const u8,
+    value: ?*Expr,
+    loc: SourceLoc,
+};
+
+pub const StructField = struct {
+    name: []const u8,
+    type_expr: *Type,
+    loc: SourceLoc,
+};
+
+pub const Type = struct {
+    tag: TypeTag,
+    loc: SourceLoc,
+    data: union {
+        named: []const u8,
+        int: struct {
+            is_signed: bool,
+            width: *Expr,
+        },
+        enum_type: struct {
+            tag_type: ?*Type,
+            fields: []EnumField,
+        },
+        packed_struct: struct {
+            fields: []StructField,
+        },
+        array: struct {
+            len: *Expr,
+            elem_type: *Type,
+        },
+    },
+};
+
+pub const NamedExpr = struct {
+    name: []const u8,
+    value: *Expr,
+    loc: SourceLoc,
+};
+
+pub const ExprTag = enum {
+    number,
+    boolean,
+    string,
+    identifier,
+    enum_literal, // e.g. .idle
+    unary,
+    binary,
+    index,
+    slice,
+    member_access,
+    call,
+    builtin_call,
+    struct_init,
+    if_expr,
+};
+
+pub const Expr = struct {
+    tag: ExprTag,
+    loc: SourceLoc,
+    data: union {
+        number: struct {
+            val: u64,
+            raw: []const u8,
+        },
+        boolean: bool,
+        string: []const u8,
+        identifier: []const u8,
+        enum_literal: []const u8,
+        unary: struct {
+            op: TokenType,
+            operand: *Expr,
+        },
+        binary: struct {
+            op: TokenType,
+            left: *Expr,
+            right: *Expr,
+        },
+        index: struct {
+            target: *Expr,
+            index: *Expr,
+        },
+        slice: struct {
+            target: *Expr,
+            start: *Expr,
+            end: *Expr,
+            is_downward: bool, // true for sugar like x[4..0]
+        },
+        member_access: struct {
+            target: *Expr,
+            field: []const u8,
+        },
+        call: struct {
+            callee: *Expr,
+            args: []*Expr,
+        },
+        builtin_call: struct {
+            tag: TokenType,
+            args: []*Expr,
+        },
+        struct_init: struct {
+            type_expr: ?*Type,
+            fields: []NamedExpr,
+        },
+        if_expr: struct {
+            cond: *Expr,
+            then_branch: *Expr,
+            else_branch: *Expr,
+        },
+    },
+};
+
+pub const SwitchCase = struct {
+    patterns: []*Expr, // empty if is_else is true
+    is_else: bool,
+    body: []Statement,
+    loc: SourceLoc,
+};
+
+pub const StatementTag = enum {
+    assign,
+    var_decl,
+    if_stmt,
+    switch_stmt,
+    inline_for,
+    expr_stmt,
+};
+
+pub const Statement = struct {
+    tag: StatementTag,
+    loc: SourceLoc,
+    data: union {
+        assign: struct {
+            target: *Expr,
+            value: *Expr,
+            is_reg_assign: bool = false,
+        },
+        var_decl: struct {
+            name: []const u8,
+            type_annot: ?*Type,
+            init_val: *Expr,
+        },
+        if_stmt: struct {
+            cond: *Expr,
+            then_stmts: []Statement,
+            else_stmts: ?[]Statement,
+        },
+        switch_stmt: struct {
+            expr: *Expr,
+            cases: []SwitchCase,
+        },
+        inline_for: struct {
+            var_name: []const u8,
+            start: *Expr,
+            end: *Expr,
+            body: []Statement,
+        },
+        expr_stmt: *Expr,
+    },
+};
+
+pub const PortBinding = struct {
+    port_name: []const u8,
+    expr: *Expr,
+    loc: SourceLoc,
+};
+
+pub const ModuleItemTag = enum {
+    port,
+    reg_decl,
+    instance,
+    comb_block,
+    sync_block,
+    const_decl,
+    sim_block,
+};
+
+pub const ModuleItem = struct {
+    tag: ModuleItemTag,
+    loc: SourceLoc,
+    data: union {
+        port: struct {
+            dir: PortDir,
+            name: []const u8,
+            type_expr: *Type,
+        },
+        reg_decl: struct {
+            name: []const u8,
+            type_expr: *Type,
+            clk: ?*Expr,
+            rst: ?*Expr,
+            init_val: *Expr,
+        },
+        instance: struct {
+            name: []const u8,
+            module_expr: *Expr,
+            bindings: []PortBinding,
+        },
+        comb_block: struct {
+            stmts: []Statement,
+        },
+        sync_block: struct {
+            clk: *Expr,
+            rst: ?*Expr,
+            stmts: []Statement,
+        },
+        const_decl: struct {
+            name: []const u8,
+            type_annot: ?*Type,
+            val: *Expr,
+        },
+        sim_block: struct {
+            stmts: []Statement,
+        },
+    },
+};
+
+pub const FnParam = struct {
+    name: []const u8,
+    type_expr: *Type,
+    is_comptime: bool,
+    loc: SourceLoc,
+};
+
+pub const DeclTag = enum {
+    const_decl,
+    fn_decl,
+    module_decl,
+    test_decl,
+};
+
+pub const Decl = struct {
+    tag: DeclTag,
+    is_pub: bool,
+    loc: SourceLoc,
+    data: union {
+        const_decl: struct {
+            name: []const u8,
+            type_annot: ?*Type,
+            val: *Expr,
+        },
+        fn_decl: struct {
+            name: []const u8,
+            params: []FnParam,
+            return_type: ?*Type,
+            body_expr: *Expr, // function returning a module expr or value
+        },
+        module_decl: struct {
+            name: []const u8,
+            items: []ModuleItem,
+        },
+        test_decl: struct {
+            name: []const u8,
+            items: []ModuleItem,
+        },
+    },
+};
+
+pub const AST = struct {
+    arena: std.heap.ArenaAllocator,
+    decls: []Decl,
+
+    pub fn deinit(self: *AST) void {
+        self.arena.deinit();
+    }
+};

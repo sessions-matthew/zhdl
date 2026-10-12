@@ -1,0 +1,10 @@
+.{
+    .name = .zhdl,
+    .fingerprint = 0x269786ac2e9d1733,
+    .version = "0.1.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
