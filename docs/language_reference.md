@@ -22,7 +22,8 @@ This document serves as the formal language specification and reference guide fo
    - [Hardware Optionals (`?T`)](#35-hardware-optionals-t)
    - [Hardware Tagged Unions (`union(enum)`)](#36-hardware-tagged-unions-unionenum)
    - [Type Methods & Pure Combinational Functions (`pub fn`)](#37-type-methods--pure-combinational-functions-pub-fn)
-   - [Comptime Generics (`fn(comptime ...) type`)](#38-comptime-generics-fncomptime--type)
+   - [Parameterized Modules & Comptime Generics (`module(params)`)](#38-parameterized-modules--comptime-generics-moduleparams)
+   - [Namespaces & Associated Declarations (`struct { ... }`)](#39-namespaces--associated-declarations-struct---)
 4. [Module Architecture & Declarations](#4-module-architecture--declarations)
    - [Module Definition](#41-module-definition)
    - [Port Declarations (`in`, `out`, `inout`)](#42-port-declarations-in-out-inout)
@@ -334,6 +335,57 @@ ZHdl provides three equivalent, clean ways to declare parameterized hardware mod
   const c1 = Counter8.instantiate(.{ .clk = clk, .rst = rst, .en = en, .count = count8 });
   const c2 = Counter(16).instantiate(.{ .clk = clk, .rst = rst, .en = en, .count = count16 });
   ```
+
+### 3.9 Namespaces & Associated Declarations (`struct { ... }`)
+
+Following Zig 0.17's namespace specification ([Zig Namespaces](https://ziglang.org/documentation/0.17.0/#Namespace)), ZHdl treats bare `struct { ... }` blocks as declaration containers (namespaces). Namespaces have **zero hardware wire footprint** (`width = 0`) and cannot be instantiated as physical signals. Instead, they organize constants, submodules, generic module generators, nested namespaces, types, and helper functions:
+
+```zig
+pub const Math = struct {
+    pub const SCALE = 4;
+
+    pub const Multiplier = module {
+        in a: u8,
+        out y: u8,
+        comb {
+            y = a * 2;
+        }
+    };
+
+    pub fn doubleVal(v: u8) u8 {
+        return v * 2;
+    }
+};
+```
+
+#### Associated Declarations in Types
+Associated `pub const` and `pub fn` declarations can also be placed directly inside `packed struct`, `enum`, and `union(enum)`:
+
+```zig
+pub const PacketHeader = packed struct {
+    len: u8,
+    pub const MAX_LEN = 128;
+};
+
+pub const State = enum(u2) {
+    idle = 0,
+    busy = 1,
+    done = 2,
+
+    pub const RESET_STATE = State.idle;
+
+    pub fn isBusy(self: State) u1 {
+        return self == .busy;
+    }
+};
+```
+
+#### Dotted Symbol Access & Aliasing
+- **Submodule Instantiation**: `const mult = Math.Multiplier.instantiate(.{ .a = val_in, .y = val_out });`
+- **Associated Constant Access**: `PacketHeader.MAX_LEN`, `State.RESET_STATE`, `Math.SCALE`
+- **Method & Static Function Calls**: `curr_state.isBusy()`, `Math.doubleVal(val_in)`
+- **Member Aliasing**: `const LocalAdder = Top.Sub.Adder;`
+- **Multi-Level Nesting**: `Top.Sub.VALUE`
 
 ---
 

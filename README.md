@@ -228,6 +228,33 @@ pub module Top {
 ```
 Transitive submodule hierarchies are automatically resolved and emitted on-demand into synthesizable SystemVerilog, with compile-time circular import protection.
 
+### 9. Zig-Style Namespaces (`struct { ... }`)
+Bare `struct { ... }` blocks act as declaration containers with **zero hardware wire footprint** (`width = 0`). They organize constants, submodules, generic module generators, nested namespaces, types, and helper functions. Associated declarations can also be placed directly inside `packed struct`, `enum`, and `union(enum)`:
+
+```zig
+pub const Math = struct {
+    pub const SCALE = 4;
+    pub const Multiplier = module {
+        in a: u8,
+        out y: u8,
+        comb { y = a * 2; }
+    };
+    pub fn doubleVal(v: u8) u8 { return v * 2; }
+};
+
+pub const State = enum(u2) {
+    idle = 0,
+    busy = 1,
+    pub const RESET_STATE = State.idle;
+    pub fn isBusy(self: State) u1 { return self == .busy; }
+};
+
+// Dotted access & submodule instantiation:
+const mult = Math.Multiplier.instantiate(.{ .a = in_val, .y = out_val });
+wire reset_val = State.RESET_STATE;
+wire busy = state.isBusy();
+```
+
 ---
 
 ## Language Ergonomics & Verification

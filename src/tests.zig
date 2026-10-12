@@ -3439,6 +3439,186 @@ test "multi-file @import: testbench instantiating imported DUT and sim run" {
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
 
+test "bare struct declaration container and namespace resolution" {
+    const src =
+        \\pub const Math = struct {
+        \\    pub const SCALE = 4;
+        \\    pub const Multiplier = module {
+        \\        in a: u8,
+        \\        out y: u8,
+        \\        comb {
+        \\            y = a * 2;
+        \\        }
+        \\    };
+        \\    pub fn doubleVal(v: u8) u8 {
+        \\        return v * 2;
+        \\    }
+        \\};
+        \\
+        \\pub const TopMod = module {
+        \\    in val_in: u8,
+        \\    out val_out: u8,
+        \\    out scaled_out: u8,
+        \\    out helper_out: u8,
+        \\
+        \\    const mult = Math.Multiplier.instantiate(.{
+        \\        .a = val_in,
+        \\        .y = val_out,
+        \\    });
+        \\
+        \\    comb {
+        \\        scaled_out = val_in + Math.SCALE;
+        \\        helper_out = Math.doubleVal(val_in);
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Multiplier") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module TopMod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "Multiplier u_mult (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "associated declarations in packed struct and enum" {
+    const src =
+        \\pub const PacketHeader = packed struct {
+        \\    len: u8,
+        \\    pub const MAX_LEN = 128;
+        \\};
+        \\
+        \\pub const State = enum(u2) {
+        \\    idle = 0,
+        \\    busy = 1,
+        \\    done = 2,
+        \\    pub const RESET_STATE = State.idle;
+        \\    pub fn isBusy(self: State) u1 {
+        \\        return self == .busy;
+        \\    }
+        \\};
+        \\
+        \\pub const AssociatedMod = module {
+        \\    in curr_state: State,
+        \\    out is_busy: u1,
+        \\    out reset_val: State,
+        \\    out max_pkt: u8,
+        \\
+        \\    comb {
+        \\        is_busy = curr_state.isBusy();
+        \\        reset_val = State.RESET_STATE;
+        \\        max_pkt = PacketHeader.MAX_LEN;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module AssociatedMod") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "member aliasing and multi-level nested namespaces" {
+    const src =
+        \\pub const Top = struct {
+        \\    pub const Sub = struct {
+        \\        pub const VALUE = 42;
+        \\        pub const Adder = module {
+        \\            in a: u8,
+        \\            in b: u8,
+        \\            out y: u8,
+        \\            comb {
+        \\                y = a + b;
+        \\            }
+        \\        };
+        \\    };
+        \\};
+        \\
+        \\const LocalAdder = Top.Sub.Adder;
+        \\
+        \\pub const NestedMod = module {
+        \\    in in_a: u8,
+        \\    in in_b: u8,
+        \\    out sum_out: u8,
+        \\    out val_out: u8,
+        \\
+        \\    const u_add = LocalAdder.instantiate(.{
+        \\        .a = in_a,
+        \\        .b = in_b,
+        \\        .y = sum_out,
+        \\    });
+        \\
+        \\    comb {
+        \\        val_out = Top.Sub.VALUE;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), hir_design.modules.len);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Adder") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module NestedMod") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "Adder u_u_add (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
 
 
 

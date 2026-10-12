@@ -18,6 +18,7 @@ pub const TypeTag = enum {
     optional,
     tagged_union,
     reset,
+    struct_type,
 };
 
 pub const EnumField = struct {
@@ -50,10 +51,13 @@ pub const Type = struct {
         enum_type: struct {
             tag_type: ?*Type,
             fields: []EnumField,
+            methods: []FnDecl = &.{},
+            constants: []Decl = &.{},
         },
         packed_struct: struct {
             fields: []StructField,
             methods: []FnDecl = &.{},
+            constants: []Decl = &.{},
         },
         array: struct {
             len: *Expr,
@@ -64,9 +68,13 @@ pub const Type = struct {
             tag_type: ?*Type,
             fields: []UnionField,
             methods: []FnDecl = &.{},
+            constants: []Decl = &.{},
         },
         reset: struct {
             is_active_low: bool,
+        },
+        struct_type: struct {
+            decls: []Decl,
         },
     },
 };

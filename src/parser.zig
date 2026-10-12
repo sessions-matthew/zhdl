@@ -132,6 +132,195 @@ pub const Parser = struct {
         return meta;
     }
 
+    pub fn parseConstDecl(self: *Parser, alloc: std.mem.Allocator, is_pub: bool) ParseError!ast.Decl {
+        const name_tok = try self.expect(.identifier);
+        var type_annot: ?*ast.Type = null;
+        if (self.match(.colon)) {
+            type_annot = try self.parseType(alloc);
+        }
+        _ = try self.expect(.equal);
+
+        // Check if this is a module or extern module definition: pub const Name = [extern(...)] module { ... };
+        var is_extern = false;
+        var foreign_name: ?[]const u8 = null;
+        var include_path: ?[]const u8 = null;
+
+        if (self.match(.kw_extern)) {
+            is_extern = true;
+            const meta = try self.parseExternMetadata(alloc);
+            foreign_name = meta.foreign_name;
+            include_path = meta.include_path;
+        }
+
+        if (is_extern or self.match(.kw_module)) {
+            if (is_extern) {
+                _ = try self.expect(.kw_module);
+            }
+            var params: []ast.FnParam = &.{};
+            if (self.match(.l_paren)) {
+                params = try self.parseFnParams(alloc, true);
+                _ = try self.expect(.r_paren);
+            }
+            const mod_items = try self.parseModuleBody(alloc);
+            _ = self.match(.semicolon);
+            if (params.len > 0) {
+                const mod_expr = try alloc.create(ast.Expr);
+                mod_expr.* = .{
+                    .tag = .module_literal,
+                    .loc = name_tok.loc,
+                    .data = .{
+                        .module_literal = .{
+                            .params = params,
+                            .items = mod_items,
+                            .is_extern = is_extern,
+                            .foreign_name = foreign_name,
+                            .include_path = include_path,
+                        },
+                    },
+                };
+                return .{
+                    .tag = .fn_decl,
+                    .is_pub = is_pub,
+                    .loc = name_tok.loc,
+                    .data = .{
+                        .fn_decl = .{
+                            .name = name_tok.slice,
+                            .is_pub = is_pub,
+                            .params = params,
+                            .return_type = null,
+                            .body_expr = mod_expr,
+                            .loc = name_tok.loc,
+                        },
+                    },
+                };
+            } else {
+                return .{
+                    .tag = .module_decl,
+                    .is_pub = is_pub,
+                    .loc = name_tok.loc,
+                    .data = .{
+                        .module_decl = .{
+                            .name = name_tok.slice,
+                            .params = params,
+                            .items = mod_items,
+                            .is_extern = is_extern,
+                            .foreign_name = foreign_name,
+                            .include_path = include_path,
+                        },
+                    },
+                };
+            }
+        } else {
+            const val_expr = try self.parseExpr(alloc);
+            _ = try self.expect(.semicolon);
+            return .{
+                .tag = .const_decl,
+                .is_pub = is_pub,
+                .loc = name_tok.loc,
+                .data = .{
+                    .const_decl = .{
+                        .name = name_tok.slice,
+                        .type_annot = type_annot,
+                        .val = val_expr,
+                    },
+                },
+            };
+        }
+    }
+
+    pub fn parseDecl(self: *Parser, alloc: std.mem.Allocator) ParseError!?ast.Decl {
+        if (self.check(.eof)) return null;
+        const is_pub = self.match(.kw_pub);
+
+        if (self.match(.kw_const)) {
+            return try self.parseConstDecl(alloc, is_pub);
+        } else if (self.match(.kw_fn)) {
+            return try self.parseFnDecl(alloc, is_pub);
+        } else if (self.match(.kw_module)) {
+            const name_tok = try self.expect(.identifier);
+            var params: []ast.FnParam = &.{};
+            if (self.match(.l_paren)) {
+                params = try self.parseFnParams(alloc, true);
+                _ = try self.expect(.r_paren);
+            }
+            const mod_items = try self.parseModuleBody(alloc);
+            _ = self.match(.semicolon);
+            if (params.len > 0) {
+                const mod_expr = try alloc.create(ast.Expr);
+                mod_expr.* = .{
+                    .tag = .module_literal,
+                    .loc = name_tok.loc,
+                    .data = .{
+                        .module_literal = .{
+                            .params = params,
+                            .items = mod_items,
+                            .is_extern = false,
+                            .foreign_name = null,
+                            .include_path = null,
+                        },
+                    },
+                };
+                return .{
+                    .tag = .fn_decl,
+                    .is_pub = is_pub,
+                    .loc = name_tok.loc,
+                    .data = .{
+                        .fn_decl = .{
+                            .name = name_tok.slice,
+                            .is_pub = is_pub,
+                            .params = params,
+                            .return_type = null,
+                            .body_expr = mod_expr,
+                            .loc = name_tok.loc,
+                        },
+                    },
+                };
+            } else {
+                return .{
+                    .tag = .module_decl,
+                    .is_pub = is_pub,
+                    .loc = name_tok.loc,
+                    .data = .{
+                        .module_decl = .{
+                            .name = name_tok.slice,
+                            .params = params,
+                            .items = mod_items,
+                            .is_extern = false,
+                            .foreign_name = null,
+                            .include_path = null,
+                        },
+                    },
+                };
+            }
+        } else if (self.match(.kw_test)) {
+            const test_name_tok = if (self.check(.string_literal))
+                try self.expect(.string_literal)
+            else
+                try self.expect(.identifier);
+
+            var name_str = test_name_tok.slice;
+            if (test_name_tok.tag == .string_literal and name_str.len >= 2 and name_str[0] == '"' and name_str[name_str.len - 1] == '"') {
+                name_str = name_str[1 .. name_str.len - 1];
+            }
+
+            const test_items = try self.parseModuleBody(alloc);
+            _ = self.match(.semicolon);
+            return .{
+                .tag = .test_decl,
+                .is_pub = is_pub,
+                .loc = test_name_tok.loc,
+                .data = .{
+                    .test_decl = .{
+                        .name = name_str,
+                        .items = test_items,
+                    },
+                },
+            };
+        } else {
+            return null;
+        }
+    }
+
     pub fn parse(self: *Parser) !ast.AST {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
@@ -140,185 +329,8 @@ pub const Parser = struct {
         var decls = ArrayList(ast.Decl).init(alloc);
 
         while (!self.check(.eof)) {
-            const is_pub = self.match(.kw_pub);
-
-            if (self.match(.kw_const)) {
-                const name_tok = try self.expect(.identifier);
-                var type_annot: ?*ast.Type = null;
-                if (self.match(.colon)) {
-                    type_annot = try self.parseType(alloc);
-                }
-                _ = try self.expect(.equal);
-
-                // Check if this is a module or extern module definition: pub const Name = [extern(...)] module { ... };
-                var is_extern = false;
-                var foreign_name: ?[]const u8 = null;
-                var include_path: ?[]const u8 = null;
-
-                if (self.match(.kw_extern)) {
-                    is_extern = true;
-                    const meta = try self.parseExternMetadata(alloc);
-                    foreign_name = meta.foreign_name;
-                    include_path = meta.include_path;
-                }
-
-                if (is_extern or self.match(.kw_module)) {
-                    if (is_extern) {
-                        _ = try self.expect(.kw_module);
-                    }
-                    var params: []ast.FnParam = &.{};
-                    if (self.match(.l_paren)) {
-                        params = try self.parseFnParams(alloc, true);
-                        _ = try self.expect(.r_paren);
-                    }
-                    const mod_items = try self.parseModuleBody(alloc);
-                    if (params.len > 0) {
-                        const mod_expr = try alloc.create(ast.Expr);
-                        mod_expr.* = .{
-                            .tag = .module_literal,
-                            .loc = name_tok.loc,
-                            .data = .{
-                                .module_literal = .{
-                                    .params = params,
-                                    .items = mod_items,
-                                    .is_extern = is_extern,
-                                    .foreign_name = foreign_name,
-                                    .include_path = include_path,
-                                },
-                            },
-                        };
-                        try decls.append(.{
-                            .tag = .fn_decl,
-                            .is_pub = is_pub,
-                            .loc = name_tok.loc,
-                            .data = .{
-                                .fn_decl = .{
-                                    .name = name_tok.slice,
-                                    .is_pub = is_pub,
-                                    .params = params,
-                                    .return_type = null,
-                                    .body_expr = mod_expr,
-                                    .loc = name_tok.loc,
-                                },
-                            },
-                        });
-                    } else {
-                        try decls.append(.{
-                            .tag = .module_decl,
-                            .is_pub = is_pub,
-                            .loc = name_tok.loc,
-                            .data = .{
-                                .module_decl = .{
-                                    .name = name_tok.slice,
-                                    .params = params,
-                                    .items = mod_items,
-                                    .is_extern = is_extern,
-                                    .foreign_name = foreign_name,
-                                    .include_path = include_path,
-                                },
-                            },
-                        });
-                    }
-                    _ = self.match(.semicolon);
-                } else {
-                    const val_expr = try self.parseExpr(alloc);
-                    _ = try self.expect(.semicolon);
-                    try decls.append(.{
-                        .tag = .const_decl,
-                        .is_pub = is_pub,
-                        .loc = name_tok.loc,
-                        .data = .{
-                            .const_decl = .{
-                                .name = name_tok.slice,
-                                .type_annot = type_annot,
-                                .val = val_expr,
-                            },
-                        },
-                    });
-                }
-            } else if (self.match(.kw_fn)) {
-                const fn_decl = try self.parseFnDecl(alloc, is_pub);
-                try decls.append(fn_decl);
-            } else if (self.match(.kw_module)) {
-                const name_tok = try self.expect(.identifier);
-                var params: []ast.FnParam = &.{};
-                if (self.match(.l_paren)) {
-                    params = try self.parseFnParams(alloc, true);
-                    _ = try self.expect(.r_paren);
-                }
-                const mod_items = try self.parseModuleBody(alloc);
-                if (params.len > 0) {
-                    const mod_expr = try alloc.create(ast.Expr);
-                    mod_expr.* = .{
-                        .tag = .module_literal,
-                        .loc = name_tok.loc,
-                        .data = .{
-                            .module_literal = .{
-                                .params = params,
-                                .items = mod_items,
-                                .is_extern = false,
-                                .foreign_name = null,
-                                .include_path = null,
-                            },
-                        },
-                    };
-                    try decls.append(.{
-                        .tag = .fn_decl,
-                        .is_pub = is_pub,
-                        .loc = name_tok.loc,
-                        .data = .{
-                            .fn_decl = .{
-                                .name = name_tok.slice,
-                                .is_pub = is_pub,
-                                .params = params,
-                                .return_type = null,
-                                .body_expr = mod_expr,
-                                .loc = name_tok.loc,
-                            },
-                        },
-                    });
-                } else {
-                    try decls.append(.{
-                        .tag = .module_decl,
-                        .is_pub = is_pub,
-                        .loc = name_tok.loc,
-                        .data = .{
-                            .module_decl = .{
-                                .name = name_tok.slice,
-                                .params = params,
-                                .items = mod_items,
-                                .is_extern = false,
-                                .foreign_name = null,
-                                .include_path = null,
-                            },
-                        },
-                    });
-                }
-                _ = self.match(.semicolon);
-            } else if (self.match(.kw_test)) {
-                const test_name_tok = if (self.check(.string_literal))
-                    try self.expect(.string_literal)
-                else
-                    try self.expect(.identifier);
-
-                var name_str = test_name_tok.slice;
-                if (test_name_tok.tag == .string_literal and name_str.len >= 2 and name_str[0] == '"' and name_str[name_str.len - 1] == '"') {
-                    name_str = name_str[1 .. name_str.len - 1];
-                }
-
-                const test_items = try self.parseModuleBody(alloc);
-                try decls.append(.{
-                    .tag = .test_decl,
-                    .is_pub = is_pub,
-                    .loc = test_name_tok.loc,
-                    .data = .{
-                        .test_decl = .{
-                            .name = name_str,
-                            .items = test_items,
-                        },
-                    },
-                });
-                _ = self.match(.semicolon);
+            if (try self.parseDecl(alloc)) |decl| {
+                try decls.append(decl);
             } else {
                 std.debug.print("Unexpected top-level token: {s} ('{s}') at {d}:{d}\n", .{
                     @tagName(self.current.tag),
@@ -1079,25 +1091,60 @@ pub const Parser = struct {
             return t;
         }
 
+        if (self.match(.kw_struct)) {
+            _ = try self.expect(.l_brace);
+            var struct_decls = ArrayList(ast.Decl).init(alloc);
+            while (!self.check(.r_brace) and !self.check(.eof)) {
+                if (try self.parseDecl(alloc)) |decl| {
+                    try struct_decls.append(decl);
+                } else {
+                    return error.UnexpectedToken;
+                }
+            }
+            _ = try self.expect(.r_brace);
+
+            const t = try alloc.create(ast.Type);
+            t.* = .{
+                .tag = .struct_type,
+                .loc = type_loc,
+                .data = .{
+                    .struct_type = .{
+                        .decls = try struct_decls.toOwnedSlice(),
+                    },
+                },
+            };
+            return t;
+        }
+
         if (self.match(.kw_packed)) {
             _ = try self.expect(.kw_struct);
             _ = try self.expect(.l_brace);
             var fields = ArrayList(ast.StructField).init(alloc);
             var methods = ArrayList(ast.FnDecl).init(alloc);
+            var constants = ArrayList(ast.Decl).init(alloc);
             while (!self.check(.r_brace) and !self.check(.eof)) {
-                if (self.check(.kw_pub) or self.check(.kw_fn)) {
+                if (self.check(.kw_pub) or self.check(.kw_fn) or self.check(.kw_const)) {
                     const is_pub = self.match(.kw_pub);
-                    _ = try self.expect(.kw_fn);
-                    const m = try self.parseFnDecl(alloc, is_pub);
-                    try methods.append(m.data.fn_decl);
-                    _ = self.match(.semicolon);
-                    _ = self.match(.comma);
+                    if (self.match(.kw_fn)) {
+                        const m = try self.parseFnDecl(alloc, is_pub);
+                        try methods.append(m.data.fn_decl);
+                        _ = self.match(.semicolon);
+                        _ = self.match(.comma);
+                    } else if (self.match(.kw_const)) {
+                        const c = try self.parseConstDecl(alloc, is_pub);
+                        try constants.append(c);
+                        _ = self.match(.semicolon);
+                        _ = self.match(.comma);
+                    } else {
+                        return error.UnexpectedToken;
+                    }
                 } else {
                     const f_loc = self.current.loc;
                     const f_name = try self.expect(.identifier);
                     _ = try self.expect(.colon);
                     const f_type = try self.parseType(alloc);
                     _ = self.match(.comma);
+                    _ = self.match(.semicolon);
                     try fields.append(.{
                         .name = f_name.slice,
                         .type_expr = f_type,
@@ -1115,6 +1162,7 @@ pub const Parser = struct {
                     .packed_struct = .{
                         .fields = try fields.toOwnedSlice(),
                         .methods = try methods.toOwnedSlice(),
+                        .constants = try constants.toOwnedSlice(),
                     },
                 },
             };
@@ -1129,19 +1177,39 @@ pub const Parser = struct {
             }
             _ = try self.expect(.l_brace);
             var fields = ArrayList(ast.EnumField).init(alloc);
+            var methods = ArrayList(ast.FnDecl).init(alloc);
+            var constants = ArrayList(ast.Decl).init(alloc);
             while (!self.check(.r_brace) and !self.check(.eof)) {
-                const f_loc = self.current.loc;
-                const f_name = try self.expect(.identifier);
-                var f_val: ?*ast.Expr = null;
-                if (self.match(.equal)) {
-                    f_val = try self.parseExpr(alloc);
+                if (self.check(.kw_pub) or self.check(.kw_fn) or self.check(.kw_const)) {
+                    const is_pub = self.match(.kw_pub);
+                    if (self.match(.kw_fn)) {
+                        const m = try self.parseFnDecl(alloc, is_pub);
+                        try methods.append(m.data.fn_decl);
+                        _ = self.match(.semicolon);
+                        _ = self.match(.comma);
+                    } else if (self.match(.kw_const)) {
+                        const c = try self.parseConstDecl(alloc, is_pub);
+                        try constants.append(c);
+                        _ = self.match(.semicolon);
+                        _ = self.match(.comma);
+                    } else {
+                        return error.UnexpectedToken;
+                    }
+                } else {
+                    const f_loc = self.current.loc;
+                    const f_name = try self.expect(.identifier);
+                    var f_val: ?*ast.Expr = null;
+                    if (self.match(.equal)) {
+                        f_val = try self.parseExpr(alloc);
+                    }
+                    _ = self.match(.comma);
+                    _ = self.match(.semicolon);
+                    try fields.append(.{
+                        .name = f_name.slice,
+                        .value = f_val,
+                        .loc = f_loc,
+                    });
                 }
-                _ = self.match(.comma);
-                try fields.append(.{
-                    .name = f_name.slice,
-                    .value = f_val,
-                    .loc = f_loc,
-                });
             }
             _ = try self.expect(.r_brace);
 
@@ -1153,6 +1221,8 @@ pub const Parser = struct {
                     .enum_type = .{
                         .tag_type = tag_type,
                         .fields = try fields.toOwnedSlice(),
+                        .methods = try methods.toOwnedSlice(),
+                        .constants = try constants.toOwnedSlice(),
                     },
                 },
             };
@@ -1175,14 +1245,23 @@ pub const Parser = struct {
 
             var fields = ArrayList(ast.UnionField).init(alloc);
             var methods = ArrayList(ast.FnDecl).init(alloc);
+            var constants = ArrayList(ast.Decl).init(alloc);
             while (!self.check(.r_brace) and !self.check(.eof)) {
-                if (self.check(.kw_pub) or self.check(.kw_fn)) {
+                if (self.check(.kw_pub) or self.check(.kw_fn) or self.check(.kw_const)) {
                     const is_pub = self.match(.kw_pub);
-                    _ = try self.expect(.kw_fn);
-                    const m = try self.parseFnDecl(alloc, is_pub);
-                    try methods.append(m.data.fn_decl);
-                    _ = self.match(.semicolon);
-                    _ = self.match(.comma);
+                    if (self.match(.kw_fn)) {
+                        const m = try self.parseFnDecl(alloc, is_pub);
+                        try methods.append(m.data.fn_decl);
+                        _ = self.match(.semicolon);
+                        _ = self.match(.comma);
+                    } else if (self.match(.kw_const)) {
+                        const c = try self.parseConstDecl(alloc, is_pub);
+                        try constants.append(c);
+                        _ = self.match(.semicolon);
+                        _ = self.match(.comma);
+                    } else {
+                        return error.UnexpectedToken;
+                    }
                 } else {
                     const f_loc = self.current.loc;
                     const f_name = try self.expect(.identifier);
@@ -1196,6 +1275,7 @@ pub const Parser = struct {
                         }
                     }
                     _ = self.match(.comma);
+                    _ = self.match(.semicolon);
                     try fields.append(.{
                         .name = f_name.slice,
                         .type_expr = f_type,
@@ -1214,6 +1294,7 @@ pub const Parser = struct {
                         .tag_type = tag_type,
                         .fields = try fields.toOwnedSlice(),
                         .methods = try methods.toOwnedSlice(),
+                        .constants = try constants.toOwnedSlice(),
                     },
                 },
             };
@@ -2050,8 +2131,8 @@ pub const Parser = struct {
             return e;
         }
 
-        // Type expressions: ?T, packed struct { ... } or enum { ... } or union(...) { ... }
-        if (self.check(.question_mark) or self.check(.kw_packed) or self.check(.kw_enum) or self.check(.kw_union)) {
+        // Type expressions: ?T, packed struct { ... } or enum { ... } or union(...) { ... } or struct { ... }
+        if (self.check(.question_mark) or self.check(.kw_packed) or self.check(.kw_enum) or self.check(.kw_union) or self.check(.kw_struct)) {
             const t = try self.parseType(alloc);
             const e = try alloc.create(ast.Expr);
             e.* = .{

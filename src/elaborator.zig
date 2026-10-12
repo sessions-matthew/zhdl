@@ -67,6 +67,7 @@ pub const Elaborator = struct {
     loaded_sources: ArrayList([]const u8),
     loading_stack: ArrayList([]const u8),
     all_module_decls: std.StringHashMap(ast.Decl),
+    str_arena: std.heap.ArenaAllocator,
 
     // Active elaboration state for dynamic register/signal injection (e.g. @sync2ff)
     active_registers: ?*ArrayList(hir.HirRegister) = null,
@@ -98,6 +99,7 @@ pub const Elaborator = struct {
             .loaded_sources = ArrayList([]const u8).init(allocator),
             .loading_stack = ArrayList([]const u8).init(allocator),
             .all_module_decls = std.StringHashMap(ast.Decl).init(allocator),
+            .str_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
@@ -154,6 +156,7 @@ pub const Elaborator = struct {
         self.all_packages.deinit();
         self.packages.deinit();
         self.all_module_decls.deinit();
+        self.str_arena.deinit();
     }
 
     pub fn setIo(self: *Elaborator, io: std.Io) void {
@@ -250,6 +253,19 @@ pub const Elaborator = struct {
         return error.FileNotFound;
     }
 
+    fn exprToDottedString(alloc: std.mem.Allocator, expr: *const ast.Expr) ?[]const u8 {
+        switch (expr.tag) {
+            .identifier => return alloc.dupe(u8, expr.data.identifier) catch null,
+            .member_access => {
+                const ma = expr.data.member_access;
+                const parent = exprToDottedString(alloc, ma.target) orelse return null;
+                defer alloc.free(parent);
+                return std.fmt.allocPrint(alloc, "{s}.{s}", .{ parent, ma.field }) catch null;
+            },
+            else => return null,
+        }
+    }
+
     fn aliasPackageMember(
         self: *Elaborator,
         pkg: *const ImportedPackage,
@@ -289,6 +305,20 @@ pub const Elaborator = struct {
             try self.fn_decls.put(alias_name, fd);
             return;
         }
+        const full_sub_ns = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ pkg.name, member_name }) catch return;
+        defer self.allocator.free(full_sub_ns);
+        if (self.packages.get(full_sub_ns)) |sub_pkg| {
+            try self.packages.put(alias_name, sub_pkg);
+            return;
+        }
+        if (self.constants.get(full_sub_ns)) |val| {
+            try self.constants.put(alias_name, val);
+            return;
+        }
+        if (self.enum_variants.get(full_sub_ns)) |val| {
+            try self.constants.put(alias_name, val);
+            return;
+        }
     }
 
     fn processConstDeclForImport(
@@ -316,16 +346,245 @@ pub const Elaborator = struct {
                     try self.aliasPackageMember(pkg, ma.field, name, module_ports, alloc);
                     return true;
                 }
-            } else if (ma.target.tag == .identifier) {
-                const pkg_id = ma.target.data.identifier;
-                if (self.packages.get(pkg_id)) |pkg| {
-                    try self.aliasPackageMember(pkg, ma.field, name, module_ports, alloc);
-                    return true;
+            } else {
+                if (exprToDottedString(self.allocator, ma.target)) |pkg_id| {
+                    defer self.allocator.free(pkg_id);
+                    if (self.packages.get(pkg_id)) |pkg| {
+                        try self.aliasPackageMember(pkg, ma.field, name, module_ports, alloc);
+                        return true;
+                    }
+                }
+                if (exprToDottedString(self.allocator, val)) |dotted| {
+                    defer self.allocator.free(dotted);
+                    if (self.constants.get(dotted)) |c_val| {
+                        try self.constants.put(name, c_val);
+                        return true;
+                    }
+                    if (self.enum_variants.get(dotted)) |v_val| {
+                        try self.constants.put(name, v_val);
+                        return true;
+                    }
                 }
             }
         }
 
         return false;
+    }
+
+    fn extractAndRegisterModulePorts(
+        self: *Elaborator,
+        items: []const ast.ModuleItem,
+        short_name: []const u8,
+        full_name: ?[]const u8,
+        mp: *std.StringHashMap([]hir.HirPort),
+        alloc: std.mem.Allocator,
+    ) !void {
+        var mports = ArrayList(hir.HirPort).init(alloc);
+        for (items) |item| {
+            if (item.tag == .port) {
+                const p = item.data.port;
+                const h_type = try self.lowerType(p.type_expr);
+                try mports.append(.{
+                    .name = p.name,
+                    .dir = switch (p.dir) {
+                        .in => .in,
+                        .out => .out,
+                        .inout => .inout,
+                    },
+                    .hir_type = h_type,
+                });
+            }
+        }
+        const owned_ports = try mports.toOwnedSlice();
+        try mp.put(short_name, owned_ports);
+        if (full_name) |fnm| {
+            try mp.put(fnm, owned_ports);
+        }
+    }
+
+    fn registerTypeConstantsAndVariants(self: *Elaborator, type_name: []const u8, te: *ast.Type) !void {
+        const str_alloc = self.str_arena.allocator();
+        if (te.tag == .enum_type) {
+            var cur_val: u64 = 0;
+            for (te.data.enum_type.fields) |f| {
+                if (f.value) |v| {
+                    cur_val = self.evalConst(v);
+                }
+                const full_var = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ type_name, f.name });
+                try self.enum_variants.put(full_var, cur_val);
+                cur_val += 1;
+            }
+            for (te.data.enum_type.constants) |cd| {
+                if (cd.tag == .const_decl) {
+                    const c = cd.data.const_decl;
+                    const val = self.evalConst(c.val);
+                    try self.constants.put(c.name, val);
+                    const full_c = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ type_name, c.name });
+                    try self.constants.put(full_c, val);
+                }
+            }
+        } else if (te.tag == .packed_struct) {
+            for (te.data.packed_struct.constants) |cd| {
+                if (cd.tag == .const_decl) {
+                    const c = cd.data.const_decl;
+                    const val = self.evalConst(c.val);
+                    try self.constants.put(c.name, val);
+                    const full_c = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ type_name, c.name });
+                    try self.constants.put(full_c, val);
+                }
+            }
+        } else if (te.tag == .tagged_union) {
+            for (te.data.tagged_union.constants) |cd| {
+                if (cd.tag == .const_decl) {
+                    const c = cd.data.const_decl;
+                    const val = self.evalConst(c.val);
+                    try self.constants.put(c.name, val);
+                    const full_c = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ type_name, c.name });
+                    try self.constants.put(full_c, val);
+                }
+            }
+        }
+    }
+
+    fn registerTypeMethods(self: *Elaborator, type_name: []const u8, te: *ast.Type) !void {
+        if (te.tag == .packed_struct) {
+            var m_map = std.StringHashMap(ast.FnDecl).init(self.allocator);
+            for (te.data.packed_struct.methods) |m| {
+                try m_map.put(m.name, m);
+            }
+            try self.type_methods.put(type_name, m_map);
+        } else if (te.tag == .tagged_union) {
+            var m_map = std.StringHashMap(ast.FnDecl).init(self.allocator);
+            for (te.data.tagged_union.methods) |m| {
+                try m_map.put(m.name, m);
+            }
+            try self.type_methods.put(type_name, m_map);
+        } else if (te.tag == .enum_type) {
+            var m_map = std.StringHashMap(ast.FnDecl).init(self.allocator);
+            for (te.data.enum_type.methods) |m| {
+                try m_map.put(m.name, m);
+            }
+            try self.type_methods.put(type_name, m_map);
+        }
+    }
+
+    fn registerNamespace(
+        self: *Elaborator,
+        ns_name: []const u8,
+        decls: []const ast.Decl,
+        module_ports: ?*std.StringHashMap([]hir.HirPort),
+        alloc: std.mem.Allocator,
+    ) anyerror!*ImportedPackage {
+        const str_alloc = self.str_arena.allocator();
+        const pkg = try self.allocator.create(ImportedPackage);
+        pkg.* = .{
+            .name = try self.allocator.dupe(u8, ns_name),
+            .path = try self.allocator.dupe(u8, ns_name),
+            .modules = std.StringHashMap(ast.Decl).init(self.allocator),
+            .generic_modules = std.StringHashMap(ast.FnDecl).init(self.allocator),
+            .types = std.StringHashMap(hir.HirType).init(self.allocator),
+            .constants = std.StringHashMap(u64).init(self.allocator),
+            .fn_decls = std.StringHashMap(ast.FnDecl).init(self.allocator),
+        };
+        try self.all_packages.append(pkg);
+        try self.packages.put(pkg.name, pkg);
+
+        // Pre-scan imports & aliases inside the namespace
+        for (decls) |decl| {
+            if (decl.tag == .const_decl) {
+                _ = try self.processConstDeclForImport(decl.data.const_decl.name, decl.data.const_decl.val, null, module_ports, alloc);
+            }
+        }
+
+        // First pass: sub-namespaces, types, constants
+        for (decls) |decl| {
+            if (decl.tag == .const_decl) {
+                const c = decl.data.const_decl;
+                if (c.val.tag == .type_expr and c.val.data.type_expr.tag == .struct_type) {
+                    const full_sub_ns = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, c.name });
+                    _ = try self.registerNamespace(full_sub_ns, c.val.data.type_expr.data.struct_type.decls, module_ports, alloc);
+                } else if (c.val.tag == .type_expr) {
+                    var h_type = try self.lowerType(c.val.data.type_expr);
+                    h_type.name = c.name;
+                    try pkg.types.put(c.name, h_type);
+                    try self.registerTypeMethods(c.name, c.val.data.type_expr);
+                    try self.registerTypeConstantsAndVariants(c.name, c.val.data.type_expr);
+
+                    const full_id = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, c.name });
+                    var h_type_namespaced = h_type;
+                    h_type_namespaced.name = full_id;
+                    try self.types.put(full_id, h_type_namespaced);
+                    try self.types.put(c.name, h_type);
+                    try self.registerTypeMethods(full_id, c.val.data.type_expr);
+                    try self.registerTypeConstantsAndVariants(full_id, c.val.data.type_expr);
+                } else if (c.val.tag == .number) {
+                    const val = c.val.data.number.val;
+                    try pkg.constants.put(c.name, val);
+                    const full_id = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, c.name });
+                    try self.constants.put(full_id, val);
+                } else if (c.val.tag != .module_literal and c.val.tag != .member_access) {
+                    const val = self.evalConst(c.val);
+                    try pkg.constants.put(c.name, val);
+                    const full_id = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, c.name });
+                    try self.constants.put(full_id, val);
+                }
+            }
+        }
+
+        // Second pass: modules, generic functions, helper functions
+        for (decls) |decl| {
+            if (decl.tag == .const_decl) {
+                const c = decl.data.const_decl;
+                if (c.val.tag == .module_literal) {
+                    const mod_decl = ast.Decl{
+                        .tag = .module_decl,
+                        .is_pub = decl.is_pub,
+                        .loc = decl.loc,
+                        .data = .{
+                            .module_decl = .{
+                                .name = c.name,
+                                .params = c.val.data.module_literal.params,
+                                .items = c.val.data.module_literal.items,
+                                .is_extern = c.val.data.module_literal.is_extern,
+                                .foreign_name = c.val.data.module_literal.foreign_name,
+                                .include_path = c.val.data.module_literal.include_path,
+                            },
+                        },
+                    };
+                    try pkg.modules.put(c.name, mod_decl);
+                    try self.all_module_decls.put(c.name, mod_decl);
+                    const full_id = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, c.name });
+                    try self.all_module_decls.put(full_id, mod_decl);
+                    if (module_ports) |mp| {
+                        try self.extractAndRegisterModulePorts(c.val.data.module_literal.items, c.name, full_id, mp, alloc);
+                    }
+                }
+            } else if (decl.tag == .module_decl) {
+                const md = decl.data.module_decl;
+                try pkg.modules.put(md.name, decl);
+                try self.all_module_decls.put(md.name, decl);
+                const full_id = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, md.name });
+                try self.all_module_decls.put(full_id, decl);
+                if (module_ports) |mp| {
+                    try self.extractAndRegisterModulePorts(md.items, md.name, full_id, mp, alloc);
+                }
+            } else if (decl.tag == .fn_decl) {
+                const fd = decl.data.fn_decl;
+                if (fd.body_expr.tag == .module_literal) {
+                    try pkg.generic_modules.put(fd.name, fd);
+                    try self.fn_decls.put(fd.name, fd);
+                    const full_id = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, fd.name });
+                    try self.fn_decls.put(full_id, fd);
+                } else {
+                    try pkg.fn_decls.put(fd.name, fd);
+                    try self.fn_decls.put(fd.name, fd);
+                    const full_id = try std.fmt.allocPrint(str_alloc, "{s}.{s}", .{ ns_name, fd.name });
+                    try self.fn_decls.put(full_id, fd);
+                }
+            }
+        }
+
+        return pkg;
     }
 
     fn loadImport(
@@ -433,80 +692,63 @@ pub const Elaborator = struct {
                         try self.constants.put(full_id, val);
                     }
                 } else if (c.val.tag == .type_expr) {
-                    var h_type = try self.lowerType(c.val.data.type_expr);
-                    h_type.name = c.name;
-                    try pkg.types.put(c.name, h_type);
-                    try self.registerTypeMethods(c.name, c.val.data.type_expr);
-                    if (pkg_name) |pname| {
-                        const full_id = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ pname, c.name });
-                        var h_type_namespaced = h_type;
-                        h_type_namespaced.name = full_id;
-                        try self.types.put(full_id, h_type_namespaced);
-                        try self.registerTypeMethods(full_id, c.val.data.type_expr);
-                    }
-                } else if (c.val.tag == .module_literal) {
-                    try pkg.modules.put(c.name, decl);
-                    try self.all_module_decls.put(c.name, decl);
-                    if (pkg_name) |pname| {
-                        const full_id = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ pname, c.name });
-                        try self.all_module_decls.put(full_id, decl);
-                    }
-                    if (module_ports) |mp| {
-                        var mports = ArrayList(hir.HirPort).init(alloc);
-                        for (c.val.data.module_literal.items) |item| {
-                            if (item.tag == .port) {
-                                const p = item.data.port;
-                                const h_type = try self.lowerType(p.type_expr);
-                                try mports.append(.{
-                                    .name = p.name,
-                                    .dir = switch (p.dir) {
-                                        .in => .in,
-                                        .out => .out,
-                                        .inout => .inout,
-                                    },
-                                    .hir_type = h_type,
-                                });
-                            }
-                        }
-                        const owned_ports = try mports.toOwnedSlice();
-                        try mp.put(c.name, owned_ports);
+                    if (c.val.data.type_expr.tag == .struct_type) {
+                        const ns_id = if (pkg_name) |pname|
+                            try std.fmt.allocPrint(self.str_arena.allocator(), "{s}.{s}", .{ pname, c.name })
+                        else
+                            c.name;
+                        _ = try self.registerNamespace(ns_id, c.val.data.type_expr.data.struct_type.decls, module_ports, alloc);
+                    } else {
+                        var h_type = try self.lowerType(c.val.data.type_expr);
+                        h_type.name = c.name;
+                        try pkg.types.put(c.name, h_type);
+                        try self.registerTypeMethods(c.name, c.val.data.type_expr);
+                        try self.registerTypeConstantsAndVariants(c.name, c.val.data.type_expr);
                         if (pkg_name) |pname| {
                             const full_id = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ pname, c.name });
-                            try mp.put(full_id, owned_ports);
+                            var h_type_namespaced = h_type;
+                            h_type_namespaced.name = full_id;
+                            try self.types.put(full_id, h_type_namespaced);
+                            try self.registerTypeMethods(full_id, c.val.data.type_expr);
+                            try self.registerTypeConstantsAndVariants(full_id, c.val.data.type_expr);
                         }
+                    }
+                } else if (c.val.tag == .module_literal) {
+                    const mod_decl = ast.Decl{
+                        .tag = .module_decl,
+                        .is_pub = decl.is_pub,
+                        .loc = decl.loc,
+                        .data = .{
+                            .module_decl = .{
+                                .name = c.name,
+                                .params = c.val.data.module_literal.params,
+                                .items = c.val.data.module_literal.items,
+                                .is_extern = c.val.data.module_literal.is_extern,
+                                .foreign_name = c.val.data.module_literal.foreign_name,
+                                .include_path = c.val.data.module_literal.include_path,
+                            },
+                        },
+                    };
+                    try pkg.modules.put(c.name, mod_decl);
+                    try self.all_module_decls.put(c.name, mod_decl);
+                    const full_id = if (pkg_name) |pname| try std.fmt.allocPrint(alloc, "{s}.{s}", .{ pname, c.name }) else null;
+                    if (full_id) |fid| {
+                        try self.all_module_decls.put(fid, mod_decl);
+                    }
+                    if (module_ports) |mp| {
+                        try self.extractAndRegisterModulePorts(c.val.data.module_literal.items, c.name, full_id, mp, alloc);
                     }
                 }
             } else if (decl.tag == .module_decl) {
                 const md = decl.data.module_decl;
                 try pkg.modules.put(md.name, decl);
                 try self.all_module_decls.put(md.name, decl);
-                if (pkg_name) |pname| {
-                    const full_id = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ pname, md.name });
-                    try self.all_module_decls.put(full_id, decl);
+                const full_id = if (pkg_name) |pname| try std.fmt.allocPrint(alloc, "{s}.{s}", .{ pname, md.name }) else null;
+                if (full_id) |fid| {
+                    try self.all_module_decls.put(fid, decl);
                 }
                 if (module_ports) |mp| {
-                    var mports = ArrayList(hir.HirPort).init(alloc);
-                    for (md.items) |item| {
-                        if (item.tag == .port) {
-                            const p = item.data.port;
-                            const h_type = try self.lowerType(p.type_expr);
-                            try mports.append(.{
-                                .name = p.name,
-                                .dir = switch (p.dir) {
-                                    .in => .in,
-                                    .out => .out,
-                                    .inout => .inout,
-                                },
-                                .hir_type = h_type,
-                            });
-                        }
-                    }
-                    const owned_ports = try mports.toOwnedSlice();
-                    try mp.put(md.name, owned_ports);
-                    if (pkg_name) |pname| {
-                        const full_id = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ pname, md.name });
-                        try mp.put(full_id, owned_ports);
-                    }
+                    try self.extractAndRegisterModulePorts(md.items, md.name, full_id, mp, alloc);
                 }
             } else if (decl.tag == .fn_decl) {
                 const fd = decl.data.fn_decl;
@@ -533,22 +775,6 @@ pub const Elaborator = struct {
             try self.packages.put(pkg.path, pkg);
         }
         return pkg;
-    }
-
-    fn registerTypeMethods(self: *Elaborator, type_name: []const u8, te: *ast.Type) !void {
-        if (te.tag == .packed_struct) {
-            var m_map = std.StringHashMap(ast.FnDecl).init(self.allocator);
-            for (te.data.packed_struct.methods) |m| {
-                try m_map.put(m.name, m);
-            }
-            try self.type_methods.put(type_name, m_map);
-        } else if (te.tag == .tagged_union) {
-            var m_map = std.StringHashMap(ast.FnDecl).init(self.allocator);
-            for (te.data.tagged_union.methods) |m| {
-                try m_map.put(m.name, m);
-            }
-            try self.type_methods.put(type_name, m_map);
-        }
     }
 
     const ParamValue = union(enum) {
@@ -904,6 +1130,8 @@ pub const Elaborator = struct {
                         .enum_type = .{
                             .tag_type = if (t.data.enum_type.tag_type) |tt| try self.cloneType(alloc, tt, substs) else null,
                             .fields = fields,
+                            .methods = t.data.enum_type.methods,
+                            .constants = t.data.enum_type.constants,
                         },
                     },
                 };
@@ -925,6 +1153,7 @@ pub const Elaborator = struct {
                         .packed_struct = .{
                             .fields = fields,
                             .methods = t.data.packed_struct.methods,
+                            .constants = t.data.packed_struct.constants,
                         },
                     },
                 };
@@ -947,6 +1176,7 @@ pub const Elaborator = struct {
                             .tag_type = if (t.data.tagged_union.tag_type) |tt| try self.cloneType(alloc, tt, substs) else null,
                             .fields = fields,
                             .methods = t.data.tagged_union.methods,
+                            .constants = t.data.tagged_union.constants,
                         },
                     },
                 };
@@ -959,6 +1189,18 @@ pub const Elaborator = struct {
                     .data = .{
                         .reset = .{
                             .is_active_low = t.data.reset.is_active_low,
+                        },
+                    },
+                };
+                return new_t;
+            },
+            .struct_type => {
+                new_t.* = .{
+                    .tag = .struct_type,
+                    .loc = t.loc,
+                    .data = .{
+                        .struct_type = .{
+                            .decls = t.data.struct_type.decls,
                         },
                     },
                 };
@@ -1300,17 +1542,17 @@ pub const Elaborator = struct {
                 }
             } else if (expr.data.call.callee.tag == .member_access) {
                 const ma = expr.data.call.callee.data.member_access;
-                if (ma.target.tag == .identifier) {
-                    const full_name = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ma.target.data.identifier, ma.field }) catch return null;
+                if (exprToDottedString(self.allocator, expr.data.call.callee)) |full_name| {
                     defer self.allocator.free(full_name);
                     if (self.fn_decls.get(full_name)) |fd| {
                         if (fd.body_expr.tag == .module_literal) {
                             return expr;
                         }
-                    } else if (self.fn_decls.get(ma.field)) |fd| {
-                        if (fd.body_expr.tag == .module_literal) {
-                            return expr;
-                        }
+                    }
+                }
+                if (self.fn_decls.get(ma.field)) |fd| {
+                    if (fd.body_expr.tag == .module_literal) {
+                        return expr;
                     }
                 }
             }
@@ -1336,6 +1578,12 @@ pub const Elaborator = struct {
 
     fn isTypeExprOrName(self: *Elaborator, expr: *ast.Expr) bool {
         if (expr.tag == .type_expr) return true;
+        if (expr.tag == .member_access) {
+            if (exprToDottedString(self.allocator, expr)) |dotted| {
+                defer self.allocator.free(dotted);
+                if (self.types.contains(dotted)) return true;
+            }
+        }
         if (expr.tag == .call and expr.data.call.callee.tag == .identifier) {
             const cname = expr.data.call.callee.data.identifier;
             if ((std.mem.eql(u8, cname, "u") or std.mem.eql(u8, cname, "i")) and expr.data.call.args.len == 1) {
@@ -1486,6 +1734,19 @@ pub const Elaborator = struct {
             };
             return t;
         }
+        if (expr.tag == .member_access) {
+            if (exprToDottedString(alloc, expr)) |dotted| {
+                const t = try alloc.create(ast.Type);
+                t.* = .{
+                    .tag = .named,
+                    .loc = expr.loc,
+                    .data = .{
+                        .named = dotted,
+                    },
+                };
+                return t;
+            }
+        }
         return error.TypeMismatch;
     }
 
@@ -1506,8 +1767,7 @@ pub const Elaborator = struct {
             fn_decl = self.fn_decls.get(fn_name) orelse return error.ModuleNotFound;
         } else if (callee.tag == .member_access) {
             const ma = callee.data.member_access;
-            if (ma.target.tag == .identifier) {
-                const full_name = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ ma.target.data.identifier, ma.field });
+            if (exprToDottedString(alloc, callee)) |full_name| {
                 fn_name = ma.field;
                 fn_decl = self.fn_decls.get(full_name) orelse (self.fn_decls.get(ma.field) orelse return error.ModuleNotFound);
             } else {
@@ -1635,16 +1895,21 @@ pub const Elaborator = struct {
         var testbenches = ArrayList(hir.HirTestbench).init(alloc);
         var module_ports = std.StringHashMap([]hir.HirPort).init(alloc);
 
-        // Pre-scan imports
+        // Pre-scan namespaces and imports
         for (self.ast_tree.decls) |decl| {
             if (decl.tag == .const_decl) {
-                _ = try self.processConstDeclForImport(
-                    decl.data.const_decl.name,
-                    decl.data.const_decl.val,
-                    self.base_dir,
-                    &module_ports,
-                    alloc,
-                );
+                const c = decl.data.const_decl;
+                if (c.val.tag == .type_expr and c.val.data.type_expr.tag == .struct_type) {
+                    _ = try self.registerNamespace(c.name, c.val.data.type_expr.data.struct_type.decls, &module_ports, alloc);
+                } else {
+                    _ = try self.processConstDeclForImport(
+                        c.name,
+                        c.val,
+                        self.base_dir,
+                        &module_ports,
+                        alloc,
+                    );
+                }
             }
         }
 
@@ -1657,10 +1922,13 @@ pub const Elaborator = struct {
                 if (c.val.tag == .number) {
                     try self.constants.put(c.name, c.val.data.number.val);
                 } else if (c.val.tag == .type_expr) {
-                    var h_type = try self.lowerType(c.val.data.type_expr);
-                    h_type.name = c.name;
-                    try self.types.put(c.name, h_type);
-                    try self.registerTypeMethods(c.name, c.val.data.type_expr);
+                    if (c.val.data.type_expr.tag != .struct_type) {
+                        var h_type = try self.lowerType(c.val.data.type_expr);
+                        h_type.name = c.name;
+                        try self.types.put(c.name, h_type);
+                        try self.registerTypeMethods(c.name, c.val.data.type_expr);
+                        try self.registerTypeConstantsAndVariants(c.name, c.val.data.type_expr);
+                    }
                 }
             }
         }
@@ -1745,14 +2013,19 @@ pub const Elaborator = struct {
                                 target_mod_name = try self.getOrMonomorphizeModule(alloc, call_expr, &modules, &module_ports, null);
                                 break;
                             } else if (item.data.instance.module_expr.tag == .identifier) {
-                                target_mod_name = item.data.instance.module_expr.data.identifier;
+                                const id = item.data.instance.module_expr.data.identifier;
+                                if (self.findModuleDecl(id)) |md| {
+                                    target_mod_name = if (md.tag == .module_decl) md.data.module_decl.name else md.data.const_decl.name;
+                                } else {
+                                    target_mod_name = id;
+                                }
                                 break;
                             } else if (item.data.instance.module_expr.tag == .member_access) {
                                 const ma = item.data.instance.module_expr.data.member_access;
-                                if (ma.target.tag == .identifier) {
-                                    if (self.packages.get(ma.target.data.identifier)) |pkg| {
+                                if (exprToDottedString(alloc, ma.target)) |pkg_id| {
+                                    if (self.packages.get(pkg_id)) |pkg| {
                                         if (pkg.modules.get(ma.field)) |md| {
-                                            target_mod_name = md.data.module_decl.name;
+                                            target_mod_name = if (md.tag == .module_decl) md.data.module_decl.name else md.data.const_decl.name;
                                         } else {
                                             target_mod_name = ma.field;
                                         }
@@ -1772,16 +2045,21 @@ pub const Elaborator = struct {
         }
 
         if (target_mod_name != null and !self.isModuleElaborated(&modules, target_mod_name.?)) {
-            if (self.findModuleDecl(target_mod_name.?)) |md| {
+            const md_opt = self.findModuleDecl(target_mod_name.?);
+            if (md_opt) |md| {
+                const m_items = if (md.tag == .module_decl) md.data.module_decl.items else md.data.const_decl.val.data.module_literal.items;
+                const m_is_extern = if (md.tag == .module_decl) md.data.module_decl.is_extern else md.data.const_decl.val.data.module_literal.is_extern;
+                const m_foreign_name = if (md.tag == .module_decl) md.data.module_decl.foreign_name else md.data.const_decl.val.data.module_literal.foreign_name;
+                const m_include_path = if (md.tag == .module_decl) md.data.module_decl.include_path else md.data.const_decl.val.data.module_literal.include_path;
                 const hir_m = try self.elaborateModule(
                     alloc,
                     target_mod_name.?,
-                    md.data.module_decl.items,
+                    m_items,
                     &module_ports,
                     &modules,
-                    md.data.module_decl.is_extern,
-                    md.data.module_decl.foreign_name,
-                    md.data.module_decl.include_path,
+                    m_is_extern,
+                    m_foreign_name,
+                    m_include_path,
                 );
                 try modules.append(hir_m);
             }
@@ -2059,11 +2337,16 @@ pub const Elaborator = struct {
                     if (self.resolveGenericCall(c.val, items) != null) {
                         // generic module alias - skip creating hardware wire
                     } else if (c.val.tag == .type_expr) {
-                        var h_type = try self.lowerType(c.val.data.type_expr);
-                        h_type.name = c.name;
-                        try self.types.put(c.name, h_type);
-                        try signal_types.put(c.name, h_type);
-                        try self.registerTypeMethods(c.name, c.val.data.type_expr);
+                        if (c.val.data.type_expr.tag == .struct_type) {
+                            _ = try self.registerNamespace(c.name, c.val.data.type_expr.data.struct_type.decls, module_ports, alloc);
+                        } else {
+                            var h_type = try self.lowerType(c.val.data.type_expr);
+                            h_type.name = c.name;
+                            try self.types.put(c.name, h_type);
+                            try signal_types.put(c.name, h_type);
+                            try self.registerTypeMethods(c.name, c.val.data.type_expr);
+                            try self.registerTypeConstantsAndVariants(c.name, c.val.data.type_expr);
+                        }
                     } else if (c.type_annot) |ta| {
                         const h_type = try self.lowerType(ta);
                         if (!is_extern) {
@@ -2130,13 +2413,18 @@ pub const Elaborator = struct {
                 if (self.resolveGenericCall(inst.module_expr, items)) |call_expr| {
                     target_mod = try self.getOrMonomorphizeModule(alloc, call_expr, modules, module_ports, &local_consts);
                 } else if (inst.module_expr.tag == .identifier) {
-                    target_mod = inst.module_expr.data.identifier;
+                    const id = inst.module_expr.data.identifier;
+                    if (self.findModuleDecl(id)) |md| {
+                        target_mod = if (md.tag == .module_decl) md.data.module_decl.name else md.data.const_decl.name;
+                    } else {
+                        target_mod = id;
+                    }
                 } else if (inst.module_expr.tag == .member_access) {
                     const ma = inst.module_expr.data.member_access;
-                    if (ma.target.tag == .identifier) {
-                        if (self.packages.get(ma.target.data.identifier)) |pkg| {
+                    if (exprToDottedString(alloc, ma.target)) |pkg_id| {
+                        if (self.packages.get(pkg_id)) |pkg| {
                             if (pkg.modules.get(ma.field)) |md| {
-                                target_mod = md.data.module_decl.name;
+                                target_mod = if (md.tag == .module_decl) md.data.module_decl.name else md.data.const_decl.name;
                             } else {
                                 target_mod = ma.field;
                             }
@@ -2155,16 +2443,21 @@ pub const Elaborator = struct {
                 }
 
                 if (!self.isModuleElaborated(modules, target_mod)) {
-                    if (self.findModuleDecl(target_mod)) |md| {
+                    const md_opt = self.findModuleDecl(target_mod) orelse (if (inst.module_expr.tag == .member_access) (if (exprToDottedString(alloc, inst.module_expr)) |dot| self.all_module_decls.get(dot) else null) else null);
+                    if (md_opt) |md| {
+                        const m_items = if (md.tag == .module_decl) md.data.module_decl.items else md.data.const_decl.val.data.module_literal.items;
+                        const m_is_extern = if (md.tag == .module_decl) md.data.module_decl.is_extern else md.data.const_decl.val.data.module_literal.is_extern;
+                        const m_foreign_name = if (md.tag == .module_decl) md.data.module_decl.foreign_name else md.data.const_decl.val.data.module_literal.foreign_name;
+                        const m_include_path = if (md.tag == .module_decl) md.data.module_decl.include_path else md.data.const_decl.val.data.module_literal.include_path;
                         const hir_m = try self.elaborateModule(
                             alloc,
                             target_mod,
-                            md.data.module_decl.items,
+                            m_items,
                             module_ports,
                             modules,
-                            md.data.module_decl.is_extern,
-                            md.data.module_decl.foreign_name,
-                            md.data.module_decl.include_path,
+                            m_is_extern,
+                            m_foreign_name,
+                            m_include_path,
                         );
                         try modules.append(hir_m);
                     }
@@ -2417,13 +2710,18 @@ pub const Elaborator = struct {
                 if (self.resolveGenericCall(inst.module_expr, items)) |call_expr| {
                     target_mod = try self.getOrMonomorphizeModule(alloc, call_expr, modules, module_ports, null);
                 } else if (inst.module_expr.tag == .identifier) {
-                    target_mod = inst.module_expr.data.identifier;
+                    const id = inst.module_expr.data.identifier;
+                    if (self.findModuleDecl(id)) |md| {
+                        target_mod = if (md.tag == .module_decl) md.data.module_decl.name else md.data.const_decl.name;
+                    } else {
+                        target_mod = id;
+                    }
                 } else if (inst.module_expr.tag == .member_access) {
                     const ma = inst.module_expr.data.member_access;
-                    if (ma.target.tag == .identifier) {
-                        if (self.packages.get(ma.target.data.identifier)) |pkg| {
+                    if (exprToDottedString(alloc, ma.target)) |pkg_id| {
+                        if (self.packages.get(pkg_id)) |pkg| {
                             if (pkg.modules.get(ma.field)) |md| {
-                                target_mod = md.data.module_decl.name;
+                                target_mod = if (md.tag == .module_decl) md.data.module_decl.name else md.data.const_decl.name;
                             } else {
                                 target_mod = ma.field;
                             }
@@ -2442,16 +2740,21 @@ pub const Elaborator = struct {
                 }
 
                 if (!self.isModuleElaborated(modules, target_mod)) {
-                    if (self.findModuleDecl(target_mod)) |md| {
+                    const md_opt = self.findModuleDecl(target_mod) orelse (if (inst.module_expr.tag == .member_access) (if (exprToDottedString(alloc, inst.module_expr)) |dot| self.all_module_decls.get(dot) else null) else null);
+                    if (md_opt) |md| {
+                        const m_items = if (md.tag == .module_decl) md.data.module_decl.items else md.data.const_decl.val.data.module_literal.items;
+                        const m_is_extern = if (md.tag == .module_decl) md.data.module_decl.is_extern else md.data.const_decl.val.data.module_literal.is_extern;
+                        const m_foreign_name = if (md.tag == .module_decl) md.data.module_decl.foreign_name else md.data.const_decl.val.data.module_literal.foreign_name;
+                        const m_include_path = if (md.tag == .module_decl) md.data.module_decl.include_path else md.data.const_decl.val.data.module_literal.include_path;
                         const hir_m = try self.elaborateModule(
                             alloc,
                             target_mod,
-                            md.data.module_decl.items,
+                            m_items,
                             module_ports,
                             modules,
-                            md.data.module_decl.is_extern,
-                            md.data.module_decl.foreign_name,
-                            md.data.module_decl.include_path,
+                            m_is_extern,
+                            m_foreign_name,
+                            m_include_path,
                         );
                         try modules.append(hir_m);
                     }
@@ -4181,10 +4484,8 @@ pub const Elaborator = struct {
             },
             .member_access => {
                 const ma = expr.data.member_access;
-                if (ma.target.tag == .identifier) {
-                    const full_name = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ma.target.data.identifier, ma.field }) catch return error.OutOfMemory;
-                    defer self.allocator.free(full_name);
-                    if (self.constants.get(full_name)) |val| {
+                if (exprToDottedString(alloc, expr)) |dotted| {
+                    if (self.constants.get(dotted)) |val| {
                         h_expr.* = .{
                             .tag = .lit,
                             .hir_type = .{ .tag = .bits, .width = 32 },
@@ -4192,6 +4493,16 @@ pub const Elaborator = struct {
                         };
                         return h_expr;
                     }
+                    if (self.enum_variants.get(dotted)) |val| {
+                        h_expr.* = .{
+                            .tag = .lit,
+                            .hir_type = .{ .tag = .bits, .width = 32 },
+                            .data = .{ .lit = .{ .val = val, .raw = try std.fmt.allocPrint(alloc, "{d}", .{val}) } },
+                        };
+                        return h_expr;
+                    }
+                }
+                if (ma.target.tag == .identifier) {
                     if (self.packages.contains(ma.target.data.identifier)) {
                         if (self.constants.get(ma.field)) |val| {
                             h_expr.* = .{
@@ -4684,13 +4995,13 @@ pub const Elaborator = struct {
                 if (callee.tag == .member_access) {
                     const ma = callee.data.member_access;
                     var static_type_name: ?[]const u8 = null;
-                    if (ma.target.tag == .identifier and self.type_methods.contains(ma.target.data.identifier)) {
-                        static_type_name = ma.target.data.identifier;
-                    } else if (ma.target.tag == .member_access and ma.target.data.member_access.target.tag == .identifier) {
-                        const candidate = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ ma.target.data.member_access.target.data.identifier, ma.target.data.member_access.field });
-                        if (self.type_methods.contains(candidate)) {
-                            static_type_name = candidate;
+                    if (exprToDottedString(alloc, ma.target)) |target_dot| {
+                        if (self.type_methods.contains(target_dot)) {
+                            static_type_name = target_dot;
                         }
+                    }
+                    if (static_type_name == null and ma.target.tag == .identifier and self.type_methods.contains(ma.target.data.identifier)) {
+                        static_type_name = ma.target.data.identifier;
                     }
 
                     if (static_type_name) |type_name| {
@@ -4717,8 +5028,7 @@ pub const Elaborator = struct {
                             h_expr.* = inlined_res.*;
                             return h_expr;
                         }
-                    } else if (ma.target.tag == .identifier and self.packages.contains(ma.target.data.identifier)) {
-                        const full_fn = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ ma.target.data.identifier, ma.field });
+                    } else if (exprToDottedString(alloc, callee)) |full_fn| {
                         const found_fn = self.fn_decls.get(full_fn) orelse self.fn_decls.get(ma.field);
                         if (found_fn) |fn_decl| {
                             var new_env = std.StringHashMap(*hir.HirExpr).init(alloc);
@@ -5015,6 +5325,12 @@ pub const Elaborator = struct {
                     .tag_width = tag_w,
                     .union_fields = union_fields,
                     .struct_fields = struct_fields,
+                };
+            },
+            .struct_type => {
+                return .{
+                    .tag = .bits,
+                    .width = 0,
                 };
             },
         }
@@ -6083,18 +6399,20 @@ pub const Elaborator = struct {
             .time_literal => return convertToNs(expr.data.time_literal),
             .freq_literal => return convertFreqToNs(expr.data.freq_literal),
             .boolean => return if (expr.data.boolean) 1 else 0,
+            .enum_literal => return self.enum_variants.get(expr.data.enum_literal) orelse 0,
             .identifier => {
                 if (local_consts) |lc| {
                     if (lc.get(expr.data.identifier)) |v| return v;
                 }
-                return self.constants.get(expr.data.identifier) orelse 1;
+                return self.constants.get(expr.data.identifier) orelse self.enum_variants.get(expr.data.identifier) orelse 1;
             },
             .member_access => {
                 const ma = expr.data.member_access;
+                if (exprToDottedString(self.str_arena.allocator(), expr)) |dotted| {
+                    if (self.constants.get(dotted)) |v| return v;
+                    if (self.enum_variants.get(dotted)) |v| return v;
+                }
                 if (ma.target.tag == .identifier) {
-                    const full_name = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ma.target.data.identifier, ma.field }) catch return 1;
-                    defer self.allocator.free(full_name);
-                    if (self.constants.get(full_name)) |v| return v;
                     if (self.constants.get(ma.field)) |v| return v;
                     if (self.enum_variants.get(ma.field)) |v| return v;
                 }
