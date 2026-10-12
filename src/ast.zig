@@ -91,9 +91,23 @@ pub const TimeLiteral = struct {
     raw: []const u8,
 };
 
+pub const FreqUnit = enum {
+    hz,
+    khz,
+    mhz,
+    ghz,
+};
+
+pub const FreqLiteral = struct {
+    val: u64,
+    unit: FreqUnit,
+    raw: []const u8,
+};
+
 pub const ExprTag = enum {
     number,
     time_literal,
+    freq_literal,
     boolean,
     string,
     identifier,
@@ -121,6 +135,7 @@ pub const Expr = struct {
             raw: []const u8,
         },
         time_literal: TimeLiteral,
+        freq_literal: FreqLiteral,
         boolean: bool,
         string: []const u8,
         identifier: []const u8,

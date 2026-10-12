@@ -2122,6 +2122,143 @@ test "loop detection: combinational wire with _q or _d suffix is correctly caugh
     try std.testing.expectError(error.CombinationalLoop, res);
 }
 
+test "sim timing: frequency literals (100MHz, 50MHz, 1GHz) and precise half-period calculation" {
+    const src =
+        \\pub const FreqDummy = module {
+        \\    in dummy: u1,
+        \\};
+        \\
+        \\test "FreqTb" {
+        \\    wire clk1: clock;
+        \\    wire clk2: clock;
+        \\    wire clk3: clock;
+        \\    wire dummy: u1 = 0;
+        \\    const dut = FreqDummy.instantiate(.{ .dummy = dummy });
+        \\    sim {
+        \\        clk1.generate(100MHz);
+        \\        clk2.generate(50MHz);
+        \\        clk3.generate(1GHz);
+        \\        delay(10ns);
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always #5ns clk1 = ~clk1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always #10ns clk2 = ~clk2;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always #500ps clk3 = ~clk3;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "sim timing: clk.step, clk.posedge, clk.negedge, rst.pulse(duration), and rst.assert_signal/deassert" {
+    const src =
+        \\pub const StepCounter = module {
+        \\    in clk: clock,
+        \\    in rst_n: reset(.low),
+        \\    in en: u1,
+        \\    out count: u8,
+        \\    reg count_reg: u8 = 0;
+        \\    comb {
+        \\        if (en) {
+        \\            count_reg := count_reg +% 1;
+        \\        }
+        \\        count = count_reg;
+        \\    }
+        \\};
+        \\
+        \\test "TimingMethodsTb" {
+        \\    wire clk: clock;
+        \\    wire rst_n: reset(.low);
+        \\    wire en: u1 = 0;
+        \\    wire count: u8;
+        \\
+        \\    const dut = StepCounter.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst_n = rst_n,
+        \\        .en = en,
+        \\        .count = count,
+        \\    });
+        \\
+        \\    sim {
+        \\        clk.generate(100MHz);
+        \\
+        \\        // Real-time duration reset pulse
+        \\        rst_n.pulse(20ns);
+        \\        assert(count == 0, "Counter should be reset to 0");
+        \\
+        \\        // Enable and step 5 cycles, then wait for negedge to sample safely
+        \\        en = 1;
+        \\        clk.step(5);
+        \\        clk.negedge();
+        \\        assert(count == 5, "Counter should be 5 after 5 enabled cycles");
+        \\
+        \\        // Advance to next rising edge and settle at falling edge
+        \\        clk.posedge();
+        \\        clk.negedge();
+        \\        assert(count == 6, "Counter increments to 6 at posedge");
+        \\
+        \\        // Manual reset assert and deassert methods
+        \\        rst_n.assert_signal();
+        \\        clk.step(2);
+        \\        clk.negedge();
+        \\        assert(count == 0, "Counter held in reset");
+        \\        rst_n.deassert();
+        \\        clk.step(1);
+        \\        clk.negedge();
+        \\        assert(count == 1, "Counter resumes after deassert");
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "#20ns;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "repeat (5) @(posedge clk);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "@(negedge clk);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "@(posedge clk);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "rst_n = 1'b0;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "rst_n = 1'b1;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+
 
 
 

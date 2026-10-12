@@ -1544,6 +1544,41 @@ pub const Parser = struct {
             return e;
         }
 
+        // Frequency literal
+        if (self.check(.freq_literal)) {
+            const raw = self.current.slice;
+            var unit: ast.FreqUnit = .mhz;
+            var num_part: []const u8 = raw;
+            if (std.ascii.endsWithIgnoreCase(raw, "ghz")) {
+                unit = .ghz;
+                num_part = raw[0 .. raw.len - 3];
+            } else if (std.ascii.endsWithIgnoreCase(raw, "mhz")) {
+                unit = .mhz;
+                num_part = raw[0 .. raw.len - 3];
+            } else if (std.ascii.endsWithIgnoreCase(raw, "khz")) {
+                unit = .khz;
+                num_part = raw[0 .. raw.len - 3];
+            } else if (std.ascii.endsWithIgnoreCase(raw, "hz")) {
+                unit = .hz;
+                num_part = raw[0 .. raw.len - 2];
+            }
+            const val = parseDec(num_part) catch 0;
+            const e = try alloc.create(ast.Expr);
+            e.* = .{
+                .tag = .freq_literal,
+                .loc = loc,
+                .data = .{
+                    .freq_literal = .{
+                        .val = val,
+                        .unit = unit,
+                        .raw = raw,
+                    },
+                },
+            };
+            self.advance();
+            return e;
+        }
+
         // Boolean
         if (self.match(.kw_true)) {
             const e = try alloc.create(ast.Expr);

@@ -219,6 +219,11 @@ pub const HirModule = struct {
     instances: []HirSubmoduleInstance,
 };
 
+pub const HirClockEdge = enum {
+    posedge,
+    negedge,
+};
+
 pub const HirSimStmtTag = enum {
     assign,
     step,
@@ -242,15 +247,18 @@ pub const HirSimStmt = struct {
         step: struct {
             clk_name: ?[]const u8,
             cycles: u64,
+            edge: HirClockEdge = .posedge,
         },
         clk_generate: struct {
             clk_name: []const u8,
             period_ns: u64,
+            half_period_str: []const u8 = "",
             raw: []const u8 = "",
         },
         rst_pulse: struct {
             rst_name: []const u8,
-            cycles: u64,
+            cycles: ?u64 = null,
+            duration_raw: ?[]const u8 = null,
             active_low: bool,
         },
         delay: struct {
@@ -280,6 +288,7 @@ pub const HirSimStmt = struct {
 pub const HirClockGen = struct {
     clk_name: []const u8,
     period_ns: u64,
+    half_period_str: []const u8 = "",
     raw: []const u8 = "",
 };
 

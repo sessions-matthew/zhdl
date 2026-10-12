@@ -16,6 +16,7 @@ pub const TokenType = enum {
     number,
     string_literal,
     time_literal,
+    freq_literal,
 
     // Hardware Keywords
     kw_module,

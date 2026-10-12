@@ -41,7 +41,7 @@ test "Counter increments and rolls over at 255" {
     });
 
     sim {
-        clk.generate(10);
+        clk.generate(100MHz);
         trace("counter_tb.vcd");
 
         // Reset the counter
@@ -50,16 +50,16 @@ test "Counter increments and rolls over at 255" {
 
         // Enable count and step 10 cycles
         en = 1;
-        step(clk, 10);
+        clk.step(10);
         assert(count == 10, "Counter should be 10 after 10 enabled cycles");
 
         // Step to near rollover (10 + 245 = 255)
-        step(clk, 245);
+        clk.step(245);
         assert(count == 255, "Counter should reach 255");
         assert(overflow == 1, "Overflow should be active at 255");
 
         // Step 1 more cycle to wrap to 0
-        step(clk, 1);
+        clk.step(1);
         assert(count == 0, "Counter should wrap to 0");
         assert(overflow == 0, "Overflow should clear after rollover");
         finish();

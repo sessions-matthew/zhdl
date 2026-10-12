@@ -518,9 +518,8 @@ pub const SystemVerilogEmitter = struct {
 
         // 3. Emit clock generators
         for (tb.clock_gens) |cg| {
-            if (cg.raw.len > 0) {
-                const half = if (cg.period_ns >= 2) cg.period_ns / 2 else 1;
-                try writer.print("    always #{d}ns {s} = ~{s};\n", .{ half, cg.clk_name, cg.clk_name });
+            if (cg.half_period_str.len > 0) {
+                try writer.print("    always #{s} {s} = ~{s};\n", .{ cg.half_period_str, cg.clk_name, cg.clk_name });
             } else {
                 const half = if (cg.period_ns >= 2) cg.period_ns / 2 else 1;
                 try writer.print("    always #{d}ns {s} = ~{s};\n", .{ half, cg.clk_name, cg.clk_name });
@@ -545,22 +544,40 @@ pub const SystemVerilogEmitter = struct {
                 .rst_pulse => {
                     const rp = stmt.data.rst_pulse;
                     const clk_to_use = default_clk;
-                    if (rp.active_low) {
-                        try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
-                        try writer.print("        repeat ({d}) @(posedge {s});\n", .{ rp.cycles, clk_to_use });
-                        try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
-                        try writer.print("        @(posedge {s});\n", .{clk_to_use});
+                    if (rp.duration_raw) |dur| {
+                        if (rp.active_low) {
+                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
+                            try writer.print("        #{s};\n", .{dur});
+                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
+                        } else {
+                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
+                            try writer.print("        #{s};\n", .{dur});
+                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
+                        }
                     } else {
-                        try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
-                        try writer.print("        repeat ({d}) @(posedge {s});\n", .{ rp.cycles, clk_to_use });
-                        try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
-                        try writer.print("        @(posedge {s});\n", .{clk_to_use});
+                        const cycles = rp.cycles orelse 1;
+                        if (rp.active_low) {
+                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
+                            try writer.print("        repeat ({d}) @(posedge {s});\n", .{ cycles, clk_to_use });
+                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
+                            try writer.print("        @(posedge {s});\n", .{clk_to_use});
+                        } else {
+                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
+                            try writer.print("        repeat ({d}) @(posedge {s});\n", .{ cycles, clk_to_use });
+                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
+                            try writer.print("        @(posedge {s});\n", .{clk_to_use});
+                        }
                     }
                 },
                 .step => {
                     const s = stmt.data.step;
                     const clk_to_use = s.clk_name orelse default_clk;
-                    try writer.print("        repeat ({d}) @(posedge {s});\n", .{ s.cycles, clk_to_use });
+                    const edge_str = if (s.edge == .negedge) "negedge" else "posedge";
+                    if (s.cycles == 1) {
+                        try writer.print("        @({s} {s});\n", .{ edge_str, clk_to_use });
+                    } else {
+                        try writer.print("        repeat ({d}) @({s} {s});\n", .{ s.cycles, edge_str, clk_to_use });
+                    }
                 },
                 .delay => {
                     const d = stmt.data.delay;

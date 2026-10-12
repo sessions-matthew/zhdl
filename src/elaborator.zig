@@ -529,6 +529,20 @@ pub const Elaborator = struct {
                 };
                 return new_e;
             },
+            .freq_literal => {
+                new_e.* = .{
+                    .tag = .freq_literal,
+                    .loc = expr.loc,
+                    .data = .{
+                        .freq_literal = .{
+                            .val = expr.data.freq_literal.val,
+                            .unit = expr.data.freq_literal.unit,
+                            .raw = try alloc.dupe(u8, expr.data.freq_literal.raw),
+                        },
+                    },
+                };
+                return new_e;
+            },
             .boolean => {
                 new_e.* = .{
                     .tag = .boolean,
@@ -1690,6 +1704,72 @@ pub const Elaborator = struct {
         };
     }
 
+    fn convertFreqToNs(fl: ast.FreqLiteral) u64 {
+        const val: u64 = if (fl.val == 0) 1 else fl.val;
+        const freq_hz: u64 = switch (fl.unit) {
+            .hz => val,
+            .khz => val * 1_000,
+            .mhz => val * 1_000_000,
+            .ghz => val * 1_000_000_000,
+        };
+        const one_billion: u64 = 1_000_000_000;
+        if (freq_hz >= one_billion) return 1;
+        return one_billion / freq_hz;
+    }
+
+    const FreqConversion = struct {
+        period_ns: u64,
+        half_period_str: []const u8,
+    };
+
+    fn convertFreqToPeriod(alloc: std.mem.Allocator, fl: ast.FreqLiteral) !FreqConversion {
+        const val: u64 = if (fl.val == 0) 1 else fl.val;
+        const freq_hz: u64 = switch (fl.unit) {
+            .hz => val,
+            .khz => val * 1_000,
+            .mhz => val * 1_000_000,
+            .ghz => val * 1_000_000_000,
+        };
+
+        const one_trillion: u128 = 1_000_000_000_000;
+        const period_ps: u64 = @intCast(one_trillion / freq_hz);
+        const half_ps: u64 = if (period_ps >= 2) period_ps / 2 else 1;
+        const period_ns: u64 = if (period_ps >= 1000) period_ps / 1000 else 1;
+
+        var half_str: []const u8 = undefined;
+        if (half_ps >= 1000 and (half_ps % 1000) == 0) {
+            half_str = try std.fmt.allocPrint(alloc, "{d}ns", .{half_ps / 1000});
+        } else {
+            half_str = try std.fmt.allocPrint(alloc, "{d}ps", .{half_ps});
+        }
+
+        return .{
+            .period_ns = period_ns,
+            .half_period_str = half_str,
+        };
+    }
+
+    fn convertTimeToHalfPeriodStr(alloc: std.mem.Allocator, tl: ast.TimeLiteral) !struct { period_ns: u64, half_str: []const u8 } {
+        const val = tl.val;
+        const period_ps: u64 = switch (tl.unit) {
+            .ps => val,
+            .ns => val * 1000,
+            .us => val * 1000000,
+            .ms => val * 1000000000,
+            .s => val * 1000000000000,
+        };
+        const half_ps: u64 = if (period_ps >= 2) period_ps / 2 else 1;
+        const period_ns: u64 = if (period_ps >= 1000) period_ps / 1000 else 1;
+
+        var half_str: []const u8 = undefined;
+        if (half_ps >= 1000 and (half_ps % 1000) == 0) {
+            half_str = try std.fmt.allocPrint(alloc, "{d}ns", .{half_ps / 1000});
+        } else {
+            half_str = try std.fmt.allocPrint(alloc, "{d}ps", .{half_ps});
+        }
+        return .{ .period_ns = period_ns, .half_str = half_str };
+    }
+
     fn lowerSimStatement(
         self: *Elaborator,
         alloc: std.mem.Allocator,
@@ -1728,19 +1808,30 @@ pub const Elaborator = struct {
                             if (std.mem.eql(u8, ma.field, "generate")) {
                                 var period: u64 = 10;
                                 var raw_str: []const u8 = "10ns";
+                                var half_str: []const u8 = "5ns";
                                 if (c.args.len > 0) {
                                     const p = c.args[0];
-                                    if (p.tag == .time_literal) {
+                                    if (p.tag == .freq_literal) {
+                                        const fc = try convertFreqToPeriod(alloc, p.data.freq_literal);
+                                        period = fc.period_ns;
+                                        half_str = fc.half_period_str;
+                                        raw_str = p.data.freq_literal.raw;
+                                    } else if (p.tag == .time_literal) {
+                                        const tc = try convertTimeToHalfPeriodStr(alloc, p.data.time_literal);
+                                        period = tc.period_ns;
+                                        half_str = tc.half_str;
                                         raw_str = p.data.time_literal.raw;
-                                        period = convertToNs(p.data.time_literal);
                                     } else if (p.tag == .number) {
                                         period = p.data.number.val;
+                                        const half = if (period >= 2) period / 2 else 1;
+                                        half_str = try std.fmt.allocPrint(alloc, "{d}ns", .{half});
                                         raw_str = try std.fmt.allocPrint(alloc, "{d}ns", .{period});
                                     }
                                 }
                                 try clock_gens.append(.{
                                     .clk_name = obj_name,
                                     .period_ns = period,
+                                    .half_period_str = half_str,
                                     .raw = raw_str,
                                 });
                                 try sim_stmts.append(.{
@@ -1749,16 +1840,73 @@ pub const Elaborator = struct {
                                         .clk_generate = .{
                                             .clk_name = obj_name,
                                             .period_ns = period,
+                                            .half_period_str = half_str,
                                             .raw = raw_str,
                                         },
                                     },
                                 });
                                 return;
+                            } else if (std.mem.eql(u8, ma.field, "step")) {
+                                var cycles: u64 = 1;
+                                if (c.args.len > 0 and c.args[0].tag == .number) {
+                                    cycles = c.args[0].data.number.val;
+                                }
+                                try sim_stmts.append(.{
+                                    .tag = .step,
+                                    .data = .{
+                                        .step = .{
+                                            .clk_name = obj_name,
+                                            .cycles = cycles,
+                                            .edge = .posedge,
+                                        },
+                                    },
+                                });
+                                return;
+                            } else if (std.mem.eql(u8, ma.field, "posedge")) {
+                                var cycles: u64 = 1;
+                                if (c.args.len > 0 and c.args[0].tag == .number) {
+                                    cycles = c.args[0].data.number.val;
+                                }
+                                try sim_stmts.append(.{
+                                    .tag = .step,
+                                    .data = .{
+                                        .step = .{
+                                            .clk_name = obj_name,
+                                            .cycles = cycles,
+                                            .edge = .posedge,
+                                        },
+                                    },
+                                });
+                                return;
+                            } else if (std.mem.eql(u8, ma.field, "negedge")) {
+                                var cycles: u64 = 1;
+                                if (c.args.len > 0 and c.args[0].tag == .number) {
+                                    cycles = c.args[0].data.number.val;
+                                }
+                                try sim_stmts.append(.{
+                                    .tag = .step,
+                                    .data = .{
+                                        .step = .{
+                                            .clk_name = obj_name,
+                                            .cycles = cycles,
+                                            .edge = .negedge,
+                                        },
+                                    },
+                                });
+                                return;
                             } else if (std.mem.eql(u8, ma.field, "pulse")) {
-                                const cycles: u64 = if (c.args.len > 0 and c.args[0].tag == .number)
-                                    c.args[0].data.number.val
-                                else
-                                    1;
+                                var cycles: ?u64 = null;
+                                var duration_raw: ?[]const u8 = null;
+                                if (c.args.len > 0) {
+                                    if (c.args[0].tag == .time_literal) {
+                                        duration_raw = c.args[0].data.time_literal.raw;
+                                    } else if (c.args[0].tag == .number) {
+                                        cycles = c.args[0].data.number.val;
+                                    }
+                                }
+                                if (cycles == null and duration_raw == null) {
+                                    cycles = 1;
+                                }
                                 var active_low = false;
                                 if (signal_types.get(obj_name)) |st| {
                                     active_low = st.is_active_low;
@@ -1779,7 +1927,74 @@ pub const Elaborator = struct {
                                         .rst_pulse = .{
                                             .rst_name = obj_name,
                                             .cycles = cycles,
+                                            .duration_raw = duration_raw,
                                             .active_low = active_low,
+                                        },
+                                    },
+                                });
+                                return;
+                            } else if (std.mem.eql(u8, ma.field, "assert_signal") or std.mem.eql(u8, ma.field, "assert")) {
+                                var active_low = false;
+                                if (signal_types.get(obj_name)) |st| {
+                                    active_low = st.is_active_low;
+                                }
+                                const active_val: u64 = if (active_low) 0 else 1;
+                                const target = try alloc.create(hir.HirExpr);
+                                target.* = .{
+                                    .tag = .signal_ref,
+                                    .hir_type = .{ .tag = .bits, .width = 1 },
+                                    .data = .{ .signal_ref = .{ .name = obj_name } },
+                                };
+                                const val_expr = try alloc.create(hir.HirExpr);
+                                val_expr.* = .{
+                                    .tag = .lit,
+                                    .hir_type = .{ .tag = .bits, .width = 1 },
+                                    .data = .{
+                                        .lit = .{
+                                            .val = active_val,
+                                            .raw = if (active_low) "0" else "1",
+                                        },
+                                    },
+                                };
+                                try sim_stmts.append(.{
+                                    .tag = .assign,
+                                    .data = .{
+                                        .assign = .{
+                                            .target = target,
+                                            .value = val_expr,
+                                        },
+                                    },
+                                });
+                                return;
+                            } else if (std.mem.eql(u8, ma.field, "deassert")) {
+                                var active_low = false;
+                                if (signal_types.get(obj_name)) |st| {
+                                    active_low = st.is_active_low;
+                                }
+                                const inactive_val: u64 = if (active_low) 1 else 0;
+                                const target = try alloc.create(hir.HirExpr);
+                                target.* = .{
+                                    .tag = .signal_ref,
+                                    .hir_type = .{ .tag = .bits, .width = 1 },
+                                    .data = .{ .signal_ref = .{ .name = obj_name } },
+                                };
+                                const val_expr = try alloc.create(hir.HirExpr);
+                                val_expr.* = .{
+                                    .tag = .lit,
+                                    .hir_type = .{ .tag = .bits, .width = 1 },
+                                    .data = .{
+                                        .lit = .{
+                                            .val = inactive_val,
+                                            .raw = if (active_low) "1" else "0",
+                                        },
+                                    },
+                                };
+                                try sim_stmts.append(.{
+                                    .tag = .assign,
+                                    .data = .{
+                                        .assign = .{
+                                            .target = target,
+                                            .value = val_expr,
                                         },
                                     },
                                 });
@@ -1812,6 +2027,39 @@ pub const Elaborator = struct {
                                     .step = .{
                                         .clk_name = clk_name,
                                         .cycles = cycles,
+                                        .edge = .posedge,
+                                    },
+                                },
+                            });
+                            return;
+                        } else if (std.mem.eql(u8, fn_name, "posedge")) {
+                            const clk_name: ?[]const u8 = if (c.args.len > 0 and c.args[0].tag == .identifier)
+                                c.args[0].data.identifier
+                            else
+                                null;
+                            try sim_stmts.append(.{
+                                .tag = .step,
+                                .data = .{
+                                    .step = .{
+                                        .clk_name = clk_name,
+                                        .cycles = 1,
+                                        .edge = .posedge,
+                                    },
+                                },
+                            });
+                            return;
+                        } else if (std.mem.eql(u8, fn_name, "negedge")) {
+                            const clk_name: ?[]const u8 = if (c.args.len > 0 and c.args[0].tag == .identifier)
+                                c.args[0].data.identifier
+                            else
+                                null;
+                            try sim_stmts.append(.{
+                                .tag = .step,
+                                .data = .{
+                                    .step = .{
+                                        .clk_name = clk_name,
+                                        .cycles = 1,
+                                        .edge = .negedge,
                                     },
                                 },
                             });
@@ -2858,6 +3106,18 @@ pub const Elaborator = struct {
                         .lit = .{
                             .val = convertToNs(expr.data.time_literal),
                             .raw = expr.data.time_literal.raw,
+                        },
+                    },
+                };
+            },
+            .freq_literal => {
+                h_expr.* = .{
+                    .tag = .lit,
+                    .hir_type = .{ .tag = .bits, .width = 64 },
+                    .data = .{
+                        .lit = .{
+                            .val = convertFreqToNs(expr.data.freq_literal),
+                            .raw = expr.data.freq_literal.raw,
                         },
                     },
                 };
@@ -4398,6 +4658,7 @@ pub const Elaborator = struct {
         switch (expr.tag) {
             .number => return expr.data.number.val,
             .time_literal => return convertToNs(expr.data.time_literal),
+            .freq_literal => return convertFreqToNs(expr.data.freq_literal),
             .boolean => return if (expr.data.boolean) 1 else 0,
             .identifier => {
                 if (local_consts) |lc| {
