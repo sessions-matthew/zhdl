@@ -155,6 +155,12 @@ zig build -Doptimize=ReleaseFast
 
 ---
 
+## Acknowledgements
+
+Designed, architected, and implemented in collaboration with **Gemini 4.8 Flash**.
+
+---
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
