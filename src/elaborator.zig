@@ -1971,16 +1971,102 @@ pub const Elaborator = struct {
             .assign => {
                 const a = stmt.data.assign;
                 const target = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                const value = try self.lowerExpr(alloc, a.value, reg_map, signal_types);
-                if (value.tag == .lit and target.hir_type.width > 0) {
-                    value.hir_type.width = target.hir_type.width;
+                var val_expr: *hir.HirExpr = undefined;
+
+                if (target.hir_type.tag == .optional) {
+                    if (a.value.tag == .null_lit) {
+                        val_expr = try alloc.create(hir.HirExpr);
+                        val_expr.* = .{
+                            .tag = .lit,
+                            .hir_type = target.hir_type,
+                            .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                        };
+                    } else {
+                        val_expr = try self.lowerExpr(alloc, a.value, reg_map, signal_types);
+                        if (val_expr.hir_type.tag != .optional) {
+                            const one_lit = try alloc.create(hir.HirExpr);
+                            one_lit.* = .{
+                                .tag = .lit,
+                                .hir_type = .{ .tag = .bits, .width = 1 },
+                                .data = .{ .lit = .{ .val = 1, .raw = "1'b1" } },
+                            };
+                            if (val_expr.tag == .lit and target.hir_type.elem_width > 0) {
+                                val_expr.hir_type.width = target.hir_type.elem_width;
+                            }
+                            var cat_args = try alloc.alloc(*hir.HirExpr, 2);
+                            cat_args[0] = one_lit;
+                            cat_args[1] = val_expr;
+                            const wrapped = try alloc.create(hir.HirExpr);
+                            wrapped.* = .{
+                                .tag = .concat,
+                                .hir_type = target.hir_type,
+                                .data = .{ .concat = .{ .args = cat_args } },
+                            };
+                            val_expr = wrapped;
+                        }
+                    }
+                } else if (target.hir_type.tag == .tagged_union and a.value.tag == .struct_init) {
+                    const si = a.value.data.struct_init;
+                    if (si.fields.len > 0) {
+                        val_expr = try self.lowerTaggedUnionInit(alloc, target.hir_type, si.fields[0], reg_map, signal_types);
+                    } else {
+                        val_expr = try alloc.create(hir.HirExpr);
+                        val_expr.* = .{
+                            .tag = .lit,
+                            .hir_type = target.hir_type,
+                            .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                        };
+                    }
+                } else if (a.value.tag == .struct_init and a.value.data.struct_init.type_expr == null and target.hir_type.struct_fields.len > 0) {
+                    const st = target.hir_type;
+                    const si = a.value.data.struct_init;
+                    var concat_args = ArrayList(*hir.HirExpr).init(alloc);
+                    var idx = st.struct_fields.len;
+                    while (idx > 0) {
+                        idx -= 1;
+                        const sf = st.struct_fields[idx];
+                        var found_val: ?*ast.Expr = null;
+                        for (si.fields) |f| {
+                            if (std.mem.eql(u8, f.name, sf.name)) {
+                                found_val = f.value;
+                                break;
+                            }
+                        }
+                        if (found_val) |fv| {
+                            const lowered_f = try self.lowerExpr(alloc, fv, reg_map, signal_types);
+                            if (lowered_f.tag == .lit and sf.width > 0) {
+                                lowered_f.hir_type.width = sf.width;
+                            }
+                            try concat_args.append(lowered_f);
+                        } else {
+                            const zero_expr = try alloc.create(hir.HirExpr);
+                            zero_expr.* = .{
+                                .tag = .lit,
+                                .hir_type = .{ .tag = .bits, .width = sf.width },
+                                .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                            };
+                            try concat_args.append(zero_expr);
+                        }
+                    }
+                    val_expr = try alloc.create(hir.HirExpr);
+                    val_expr.* = .{
+                        .tag = .concat,
+                        .hir_type = st,
+                        .data = .{ .concat = .{ .args = try concat_args.toOwnedSlice() } },
+                    };
+                } else {
+                    val_expr = try self.lowerExpr(alloc, a.value, reg_map, signal_types);
+                }
+
+                if (val_expr.tag == .lit and target.hir_type.width > 0) {
+                    val_expr.hir_type.width = target.hir_type.width;
                 }
                 try sim_stmts.append(.{
                     .tag = .assign,
                     .data = .{
                         .assign = .{
                             .target = target,
-                            .value = value,
+                            .value = val_expr,
                         },
                     },
                 });
@@ -3275,9 +3361,15 @@ pub const Elaborator = struct {
 
         switch (expr.tag) {
             .number => {
+                var width: u32 = 32;
+                if (std.mem.indexOfScalar(u8, expr.data.number.raw, '\'')) |quote_pos| {
+                    if (quote_pos > 0) {
+                        width = std.fmt.parseInt(u32, expr.data.number.raw[0..quote_pos], 10) catch 32;
+                    }
+                }
                 h_expr.* = .{
                     .tag = .lit,
-                    .hir_type = .{ .tag = .bits, .width = 32 },
+                    .hir_type = .{ .tag = .bits, .width = width },
                     .data = .{
                         .lit = .{
                             .val = expr.data.number.val,
@@ -3560,6 +3652,22 @@ pub const Elaborator = struct {
                                             .is_downward = false,
                                         },
                                     },
+                                };
+                            } else if ((bc.tag == .builtin_as or bc.tag == .builtin_bit_cast) and sub.tag != .lit and target_w > sub.hir_type.width) {
+                                const pad_w = target_w - sub.hir_type.width;
+                                const zero_lit = try alloc.create(hir.HirExpr);
+                                zero_lit.* = .{
+                                    .tag = .lit,
+                                    .hir_type = .{ .tag = .bits, .width = pad_w },
+                                    .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                                };
+                                var cat_args = try alloc.alloc(*hir.HirExpr, 2);
+                                cat_args[0] = zero_lit;
+                                cat_args[1] = sub;
+                                h_expr.* = .{
+                                    .tag = .concat,
+                                    .hir_type = if (target_type) |tt| tt else hir.HirType{ .tag = .bits, .width = target_w },
+                                    .data = .{ .concat = .{ .args = cat_args } },
                                 };
                             } else {
                                 if (sub.tag == .lit and target_w < 64) {

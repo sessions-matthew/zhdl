@@ -1,0 +1,130 @@
+//! Elastic Stream Pipeline / Skid Buffer
+//!
+//! Demonstrates:
+//! 1. Hardware Optionals ('?T') representing valid/data stream beats.
+//! 2. Zero-bubble elastic buffering: absorbs backpressure stalls without losing transactions.
+//! 3. Comptime generic sizing: 'SkidBuffer(comptime W: usize) type'.
+//! 4. Comprehensive testbench with backpressure stalls, burst transfers, and drain assertions.
+
+pub fn SkidBuffer(comptime W: usize) type {
+    return module {
+        in clk: clock,
+        in rst_n: reset(.low),
+
+        // Slave (Upstream Producer) interface
+        in s_data: ?u(W),
+        out s_ready: u1,
+
+        // Master (Downstream Consumer) interface
+        out m_data: ?u(W),
+        in m_ready: u1,
+
+        reg buf_data: ?u(W) = null;
+        reg skid_data: ?u(W) = null;
+
+        comb {
+            if (skid_data != null) {
+                // Buffer is full (2 items stored) -> Upstream must stall
+                s_ready = 0;
+                m_data = buf_data;
+
+                if (m_ready) {
+                    // Downstream consumed buf_data; advance skid_data into buf_data
+                    buf_data := skid_data;
+                    skid_data := null;
+                }
+            } else if (buf_data != null) {
+                // Buffer has 1 item -> Upstream may continue producing
+                s_ready = 1;
+                m_data = buf_data;
+
+                if (m_ready) {
+                    if (s_data != null) {
+                        buf_data := s_data;
+                    } else {
+                        buf_data := null;
+                    }
+                } else {
+                    // Downstream stalled; if upstream presents data, absorb it into skid_data
+                    if (s_data != null) {
+                        skid_data := s_data;
+                    }
+                }
+            } else {
+                // Buffer is empty
+                s_ready = 1;
+                m_data = null;
+
+                if (s_data != null) {
+                    buf_data := s_data;
+                }
+            }
+        }
+    };
+}
+
+test "SkidBuffer absorbs backpressure without bubble cycles" {
+    wire clk: clock;
+    wire rst_n: reset(.low);
+    wire s_data: ?u32;
+    wire s_ready: u1;
+    wire m_data: ?u32;
+    wire m_ready: u1;
+
+    const dut = SkidBuffer(32).instantiate(.{
+        .clk = clk,
+        .rst_n = rst_n,
+        .s_data = s_data,
+        .s_ready = s_ready,
+        .m_data = m_data,
+        .m_ready = m_ready,
+    });
+
+    sim {
+        clk.generate(100MHz);
+        trace("skid_buffer_tb.vcd");
+
+        rst_n.pulse(20ns);
+        s_data = null;
+        m_ready = 1;
+        clk.step();
+        assert(s_ready == 1, "Buffer should be ready out of reset");
+        assert(m_data.valid == 0, "No output when empty");
+
+        // 1. Send first item: 0x1111_2222
+        s_data = 0x11112222;
+        clk.step();
+        assert(m_data.valid == 1, "First item available at output");
+        assert(m_data.data == 0x11112222, "First item data match");
+        assert(s_ready == 1, "Still ready for second item");
+
+        // 2. Introduce downstream stall: m_ready = 0, but upstream sends 0x3333_4444
+        m_ready = 0;
+        s_data = 0x33334444;
+        clk.step();
+        // Now buffer should be full: buf_data has 0x1111_2222, skid_data has 0x3333_4444
+        assert(s_ready == 0, "Buffer full: s_ready must drop to 0");
+        assert(m_data.valid == 1, "Output still presents first item");
+        assert(m_data.data == 0x11112222, "Output holds first item during stall");
+
+        // 3. Keep stalled for 2 more cycles with upstream idle
+        s_data = null;
+        clk.step(2);
+        assert(s_ready == 0, "Still backpressuring while stalled");
+        assert(m_data.data == 0x11112222, "Output still holds first item");
+
+        // 4. Release downstream stall: m_ready = 1
+        m_ready = 1;
+        clk.step();
+        // Downstream consumed first item; skid buffer advances 0x3333_4444 into output!
+        assert(m_data.valid == 1, "Second item now at output");
+        assert(m_data.data == 0x33334444, "Second item data match");
+        assert(s_ready == 1, "Buffer has capacity again");
+
+        // 5. Drain the second item
+        clk.step();
+        assert(m_data.valid == 0, "Buffer now completely drained");
+        assert(s_ready == 1, "Ready for new transactions");
+        finish();
+    }
+}

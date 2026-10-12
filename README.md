@@ -189,6 +189,26 @@ const dsp = XilinxDsp.instantiate(
 
 ---
 
+## Example Designs
+
+The [`examples/`](examples/) directory includes full, self-contained hardware designs covering every language feature, verified against both `./zhdl lint` (Verilator `-Wall`) and `./zhdl test`:
+
+| Example | Highlights & Language Features Demonstrated |
+|---|---|
+| [`blackbox_dsp.zhdl`](examples/blackbox_dsp.zhdl) | `extern("DSP48E1", .{ .include = "..." })` black box IP integration, compile-time Verilog parameter overrides (`.A_WIDTH`, `.B_WIDTH`), synthesizable stubs, and 100MHz behavioral testbench. |
+| [`riscv_decoder.zhdl`](examples/riscv_decoder.zhdl) | Complete RV32I instruction decoder and execution unit using `packed struct` with type methods (`isSub()`, `getSignExtendedImm()`, `getLuiVal()`, `getBranchOffset()`), hardware tagged unions `union(enum)`, pattern matching `switch`, and bit-exact sign-extension. |
+| [`skid_buffer.zhdl`](examples/skid_buffer.zhdl) | Zero-bubble elastic pipeline stream buffering with ready/valid backpressure, hardware optionals `?T`, `null` checks, auto-wrapping, and 2-entry internal queueing. |
+| [`async_fifo.zhdl`](examples/async_fifo.zhdl) | Dual asynchronous clock domains (100MHz write, 33MHz read), active-low resets (`reset(.low)`), Gray code pointer conversion, static CDC checking, and safe CDC synchronization via `@sync2ff`. |
+| [`packet_filter.zhdl`](examples/packet_filter.zhdl) | Parameterized generic module `fn(comptime W: usize) type`, tagged unions `union(enum)`, optional streams `?u(W)`, type methods, and clock/reset simulation primitives. |
+| [`ads131m04.zhdl`](examples/ads131m04.zhdl) | Industrial 24-bit 4-channel delta-sigma ADC hardware interface with synchronous SPI framed protocol, DRDY pulse generation, and register control. |
+| [`uart_bridge.zhdl`](examples/uart_bridge.zhdl) | Full-duplex UART receiver/transmitter with start/stop framing, CRC16 verification, byte streaming, and host injection FIFO. |
+| [`am335x_timer.zhdl`](examples/am335x_timer.zhdl) | AM335x SoC 32-bit hardware timer peripheral with OCP register bus interface, compare-match interrupts, prescaler, and soft reset. |
+| [`fifo.zhdl`](examples/fifo.zhdl) | Parameterized synchronous FIFO with status flags (`full`, `empty`), rollover pointers, and RAM buffer. |
+| [`fsm.zhdl`](examples/fsm.zhdl) | Clean Moore/Mealy finite state machine with tagged enum states, one-hot transition logic, and pulse outputs. |
+| [`counter.zhdl`](examples/counter.zhdl) | Basic synchronous counter with wrap-around and synchronous reset. |
+
+---
+
 ## Acknowledgements
 
 Designed, architected, and implemented in collaboration with **Gemini 4.8 Flash**.

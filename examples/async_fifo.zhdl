@@ -1,0 +1,161 @@
+//! Dual-Clock Asynchronous FIFO with Gray Pointers and CDC Synchronization
+//!
+//! Demonstrates:
+//! 1. Multi-clock domain design: 'wr_clk' and 'rd_clk' running at independent frequencies.
+//! 2. Static CDC verification: safe cross-clock synchronization via '@sync2ff'.
+//! 3. Binary-to-Gray pointer encoding for glitch-free cross-domain transfers.
+//! 4. Empty and Full flag generation across asynchronous clock domains.
+//! 5. Multi-clock simulation: 100MHz write clock and 33MHz read clock with burst verification.
+
+pub const AsyncFifo = module {
+    in wr_clk: clock,
+    in wr_rst_n: reset(.low),
+    in wr_en: u1,
+    in wr_data: u16,
+    out full: u1,
+
+    in rd_clk: clock,
+    in rd_rst_n: reset(.low),
+    in rd_en: u1,
+    out rd_data: u16,
+    out empty: u1,
+
+    // Write domain registers
+    reg(wr_clk, wr_rst_n) wr_ptr_bin: u4 = 0;
+    reg(wr_clk, wr_rst_n) wr_ptr_gray: u4 = 0;
+    reg(wr_clk, wr_rst_n) mem: [8]u16 = 0;
+
+    // Read domain registers
+    reg(rd_clk, rd_rst_n) rd_ptr_bin: u4 = 0;
+    reg(rd_clk, rd_rst_n) rd_ptr_gray: u4 = 0;
+
+    // 2-stage synchronizers across clock domains
+    wire rd_ptr_gray_sync: u4 = @sync2ff(wr_clk, rd_ptr_gray);
+    wire wr_ptr_gray_sync: u4 = @sync2ff(rd_clk, wr_ptr_gray);
+
+    comb {
+        // Full condition: MSB inverted, second MSB inverted, lower 2 bits match
+        full = (wr_ptr_gray[3] != rd_ptr_gray_sync[3]) and
+               (wr_ptr_gray[2] != rd_ptr_gray_sync[2]) and
+               (wr_ptr_gray[1:0] == rd_ptr_gray_sync[1:0]);
+
+        // Empty condition: write and read Gray pointers match exactly
+        empty = (rd_ptr_gray == wr_ptr_gray_sync);
+
+        // Write logic (clocked by wr_clk)
+        if (wr_en and !full) {
+            mem[wr_ptr_bin[2:0]] := wr_data;
+            var next_wr_bin: u4 = wr_ptr_bin +% 1;
+            wr_ptr_bin := next_wr_bin;
+            wr_ptr_gray := next_wr_bin ^ (next_wr_bin >> 1);
+        }
+
+        // Read logic
+        rd_data = mem[rd_ptr_bin[2:0]];
+        if (rd_en and !empty) {
+            var next_rd_bin: u4 = rd_ptr_bin +% 1;
+            rd_ptr_bin := next_rd_bin;
+            rd_ptr_gray := next_rd_bin ^ (next_rd_bin >> 1);
+        }
+    }
+};
+
+test "AsyncFifo writes at 100MHz and reads at 33MHz across clock domains" {
+    wire wr_clk: clock;
+    wire wr_rst_n: reset(.low);
+    wire wr_en: u1;
+    wire wr_data: u16;
+    wire full: u1;
+
+    wire rd_clk: clock;
+    wire rd_rst_n: reset(.low);
+    wire rd_en: u1;
+    wire rd_data: u16;
+    wire empty: u1;
+
+    const dut = AsyncFifo.instantiate(.{
+        .wr_clk = wr_clk,
+        .wr_rst_n = wr_rst_n,
+        .wr_en = wr_en,
+        .wr_data = wr_data,
+        .full = full,
+        .rd_clk = rd_clk,
+        .rd_rst_n = rd_rst_n,
+        .rd_en = rd_en,
+        .rd_data = rd_data,
+        .empty = empty,
+    });
+
+    sim {
+        // 1. Generate independent asynchronous clocks
+        wr_clk.generate(100MHz); // 10ns period
+        rd_clk.generate(33MHz);  // ~30ns period
+        trace("async_fifo_tb.vcd");
+
+        // 2. Reset both domains simultaneously
+        wr_rst_n.pulse(20ns);
+        rd_rst_n.pulse(20ns);
+        wr_en = 0;
+        rd_en = 0;
+        wr_data = 0;
+        delay(30ns);
+
+        assert(empty == 1, "FIFO should be empty out of reset");
+        assert(full == 0, "FIFO should not be full out of reset");
+
+        // 3. Write 4 words at 100MHz: 0xA1, 0xA2, 0xA3, 0xA4
+        wr_clk.negedge();
+        wr_en = 1;
+        wr_data = 0x00A1;
+        wr_clk.posedge();
+        wr_clk.negedge();
+
+        wr_data = 0x00A2;
+        wr_clk.posedge();
+        wr_clk.negedge();
+
+        wr_data = 0x00A3;
+        wr_clk.posedge();
+        wr_clk.negedge();
+
+        wr_data = 0x00A4;
+        wr_clk.posedge();
+        wr_clk.negedge();
+        wr_en = 0;
+
+        // Allow write pointer to propagate through 2-stage synchronizer into rd_clk domain
+        rd_clk.step(3);
+        rd_clk.negedge();
+        assert(empty == 0, "FIFO should no longer be empty in rd_clk domain");
+
+        // 4. Read 2 words at 33MHz: expect 0xA1, then 0xA2
+        assert(rd_data == 0x00A1, "First word should be 0xA1");
+        rd_en = 1;
+        rd_clk.posedge();
+        rd_clk.negedge();
+
+        assert(rd_data == 0x00A2, "Second word should be 0xA2");
+        rd_clk.posedge();
+        rd_clk.negedge();
+
+        rd_en = 0;
+        assert(empty == 0, "FIFO still has 2 unread words");
+
+        // 5. Read remaining 2 words: 0xA3 and 0xA4
+        assert(rd_data == 0x00A3, "Third word should be 0xA3");
+        rd_en = 1;
+        rd_clk.posedge();
+        rd_clk.negedge();
+
+        assert(rd_data == 0x00A4, "Fourth word should be 0xA4");
+        rd_clk.posedge();
+        rd_clk.negedge();
+        rd_en = 0;
+
+        // Step rd_clk to settle empty flag
+        rd_clk.step(2);
+        rd_clk.negedge();
+        assert(empty == 1, "FIFO should be empty after reading all 4 words");
+        finish();
+    }
+}

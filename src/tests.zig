@@ -2500,6 +2500,45 @@ test "blackbox: external source file inclusion via .include and behavioral simul
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
 
+test "sized number literals width inference and concatenation" {
+    const src =
+        \\pub const SizedLitModule = module {
+        \\    in a: u12,
+        \\    out out32: u32,
+        \\    out out7: u7,
+        \\
+        \\    comb {
+        \\        out32 = @concat(20'hFFFFF, a);
+        \\        out7 = 7'b0110011;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "{20'hfffff, a}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "7'b110011") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+
 
 
 

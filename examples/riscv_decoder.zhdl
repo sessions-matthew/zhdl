@@ -1,0 +1,241 @@
+//! RISC-V RV32I Instruction Decoder & Execution Unit
+//!
+//! Demonstrates:
+//! 1. 'packed struct' with type methods for bit-exact instruction formats and sign-extension.
+//! 2. 'union(enum)' tagged unions representing categorized decoded instructions.
+//! 3. Pattern matching with exhaustive 'switch' statements.
+//! 4. Arithmetic logic unit (ALU) execution and branch condition evaluation.
+//! 5. Comprehensive testbench decoding real machine code (ADDI, ADD, SUB, LUI, BEQ).
+
+pub const RType = packed struct {
+    opcode: u7,
+    rd: u5,
+    funct3: u3,
+    rs1: u5,
+    rs2: u5,
+    funct7: u7,
+
+    pub fn isSub(self: RType) u1 {
+        return self.funct7[5];
+    }
+};
+
+pub const IType = packed struct {
+    opcode: u7,
+    rd: u5,
+    funct3: u3,
+    rs1: u5,
+    imm11_0: u12,
+
+    pub fn getSignExtendedImm(self: IType) u32 {
+        return if (self.imm11_0[11])
+            @concat(20'hFFFFF, self.imm11_0)
+        else
+            @concat(20'h00000, self.imm11_0);
+    }
+};
+
+pub const UType = packed struct {
+    opcode: u7,
+    rd: u5,
+    imm31_12: u20,
+
+    pub fn getLuiVal(self: UType) u32 {
+        return @concat(self.imm31_12, 12'h000);
+    }
+};
+
+pub const BType = packed struct {
+    opcode: u7,
+    imm11: u1,
+    imm4_1: u4,
+    funct3: u3,
+    rs1: u5,
+    rs2: u5,
+    imm10_5: u6,
+    imm12: u1,
+
+    pub fn getBranchOffset(self: BType) u32 {
+        return if (self.imm12)
+            @concat(19'h7FFFF, self.imm12, self.imm11, self.imm10_5, self.imm4_1, 1'b0)
+        else
+            @concat(19'h00000, self.imm12, self.imm11, self.imm10_5, self.imm4_1, 1'b0);
+    }
+};
+
+pub const DecodedOp = union(enum) {
+    alu_reg: RType,
+    alu_imm: IType,
+    lui: UType,
+    branch: BType,
+    illegal: void,
+};
+
+pub const RiscvDecoder = module {
+    in clk: clock,
+    in rst: reset,
+    in pc: u32,
+    in instr: u32,
+    in rs1_data: u32,
+    in rs2_data: u32,
+
+    out wb_en: u1,
+    out wb_rd: u5,
+    out wb_data: u32,
+    out branch_taken: u1,
+    out next_pc: u32,
+
+    comb {
+        wire opcode: u7 = instr[6:0];
+        wire r_fmt: RType = @bitCast(RType, instr);
+        wire i_fmt: IType = @bitCast(IType, instr);
+        wire u_fmt: UType = @bitCast(UType, instr);
+        wire b_fmt: BType = @bitCast(BType, instr);
+
+        var op: DecodedOp = DecodedOp{ .illegal = 0 };
+
+        switch (opcode) {
+            7'b0110011 => { // OP (register-register ALU: ADD, SUB, etc.)
+                op = DecodedOp{ .alu_reg = r_fmt };
+            },
+            7'b0010011 => { // OP-IMM (ADDI, etc.)
+                op = DecodedOp{ .alu_imm = i_fmt };
+            },
+            7'b0110111 => { // LUI
+                op = DecodedOp{ .lui = u_fmt };
+            },
+            7'b1100011 => { // BRANCH (BEQ, BNE, etc.)
+                op = DecodedOp{ .branch = b_fmt };
+            },
+            else => {
+                op = DecodedOp{ .illegal = 0 };
+            },
+        }
+
+        // Execution stage
+        wb_en = 0;
+        wb_rd = 0;
+        wb_data = 0;
+        branch_taken = 0;
+        next_pc = pc +% 4;
+
+        switch (op) {
+            .alu_reg => |r| {
+                wb_en = (r.rd != 0);
+                wb_rd = r.rd;
+                if (r.isSub()) {
+                    wb_data = rs1_data -% rs2_data;
+                } else {
+                    wb_data = rs1_data +% rs2_data;
+                }
+            },
+            .alu_imm => |i| {
+                wb_en = (i.rd != 0);
+                wb_rd = i.rd;
+                wb_data = rs1_data +% i.getSignExtendedImm();
+            },
+            .lui => |u_val| {
+                wb_en = (u_val.rd != 0);
+                wb_rd = u_val.rd;
+                wb_data = u_val.getLuiVal();
+            },
+            .branch => |b| {
+                if (rs1_data == rs2_data) {
+                    branch_taken = 1;
+                    next_pc = pc +% b.getBranchOffset();
+                }
+            },
+            .illegal => {},
+        }
+    }
+};
+
+test "RiscvDecoder decodes and executes RV32I instructions" {
+    wire clk: clock;
+    wire rst: reset;
+    wire pc: u32;
+    wire instr: u32;
+    wire rs1_data: u32;
+    wire rs2_data: u32;
+
+    wire wb_en: u1;
+    wire wb_rd: u5;
+    wire wb_data: u32;
+    wire branch_taken: u1;
+    wire next_pc: u32;
+
+    const dut = RiscvDecoder.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .pc = pc,
+        .instr = instr,
+        .rs1_data = rs1_data,
+        .rs2_data = rs2_data,
+        .wb_en = wb_en,
+        .wb_rd = wb_rd,
+        .wb_data = wb_data,
+        .branch_taken = branch_taken,
+        .next_pc = next_pc,
+    });
+
+    sim {
+        trace("riscv_decoder_tb.vcd");
+        pc = 32'h00001000;
+        rs1_data = 0;
+        rs2_data = 0;
+
+        // 1. ADDI x1, x0, 42
+        // Encoded: imm=42 (0x02a), rs1=0, funct3=0, rd=1, opcode=0x13 -> 0x02a00093
+        instr = 32'h02a00093;
+        delay(5);
+        assert(wb_en == 1, "ADDI should enable writeback");
+        assert(wb_rd == 1, "ADDI writeback to x1");
+        assert(wb_data == 42, "ADDI result should be 42");
+        assert(branch_taken == 0, "ADDI should not branch");
+        assert(next_pc == 32'h00001004, "Next PC sequential");
+
+        // 2. ADD x3, x1, x2 (rs1_data=42, rs2_data=58)
+        // Encoded: funct7=0, rs2=2, rs1=1, funct3=0, rd=3, opcode=0x33 -> 0x002081b3
+        instr = 32'h002081b3;
+        rs1_data = 42;
+        rs2_data = 58;
+        delay(5);
+        assert(wb_en == 1, "ADD should enable writeback");
+        assert(wb_rd == 3, "ADD writeback to x3");
+        assert(wb_data == 100, "ADD 42 + 58 should equal 100");
+
+        // 3. SUB x3, x1, x2 (rs1_data=100, rs2_data=30)
+        // Encoded: funct7=0x20, rs2=2, rs1=1, funct3=0, rd=3, opcode=0x33 -> 0x402081b3
+        instr = 32'h402081b3;
+        rs1_data = 100;
+        rs2_data = 30;
+        delay(5);
+        assert(wb_en == 1, "SUB should enable writeback");
+        assert(wb_rd == 3, "SUB writeback to x3");
+        assert(wb_data == 70, "SUB 100 - 30 should equal 70");
+
+        // 4. LUI x5, 0x12345
+        // Encoded: imm=0x12345, rd=5, opcode=0x37 -> 0x123452b7
+        instr = 32'h123452b7;
+        delay(5);
+        assert(wb_en == 1, "LUI should enable writeback");
+        assert(wb_rd == 5, "LUI writeback to x5");
+        assert(wb_data == 32'h12345000, "Lui value shifted 12 bits");
+
+        // 5. BEQ x1, x2, offset (rs1=40, rs2=40 -> taken!)
+        // Encoded: BEQ with offset=16 -> 0x00208863
+        instr = 32'h00208863;
+        rs1_data = 40;
+        rs2_data = 40;
+        delay(5);
+        assert(branch_taken == 1, "BEQ should be taken when rs1 == rs2");
+        assert(next_pc == 32'h00001010, "Branch target PC calculated from offset");
+
+        // 6. BEQ x1, x2, offset (rs1=40, rs2=41 -> NOT taken!)
+        rs2_data = 41;
+        delay(5);
+        assert(branch_taken == 0, "BEQ should not be taken when rs1 != rs2");
+        assert(next_pc == 32'h00001004, "Next PC sequential when not taken");
+        finish();
+    }
+}
