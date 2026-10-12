@@ -13,36 +13,32 @@ pub const Command = union(enum) {
     idle: void,
 };
 
-pub fn PacketFilter(comptime W: usize) type {
-    return module {
-        in clk: clock,
-        in rst_n: reset(.low),
-        in cmd: Command,
-        out rx_stream: ?u(W),
+pub const PacketFilter = module(comptime W: usize) {
+    in clk: clock,
+    in rst_n: reset(.low),
+    in cmd: Command,
+    out rx_stream: ?u(W),
 
-        reg active_header: ?PacketHeader = null;
+    reg active_header: ?PacketHeader = null;
 
-        comb {
-            switch (cmd) {
-                .ping => |echo| {
-                    rx_stream = echo; // Auto-wraps payload into valid/data stream
-                },
-                .data => |hdr| {
-                    if (hdr.isNull()) {
-                        active_header := null; // Clears optional register
-                        rx_stream = null;
-                    } else {
-                        active_header := hdr;  // ':=' schedules 1-cycle flop update
-                        rx_stream = hdr.len[7:0];
-                    }
-                },
-                .idle => {
-                    rx_stream = null;
-                },
+    switch (cmd) {
+        .ping => |echo| {
+            rx_stream = echo; // Auto-wraps payload into valid/data stream
+        },
+        .data => |hdr| {
+            if (hdr.isNull()) {
+                active_header := null; // Clears optional register
+                rx_stream = null;
+            } else {
+                active_header := hdr;  // ':=' schedules 1-cycle flop update
+                rx_stream = hdr.len[7:0];
             }
-        }
-    };
-}
+        },
+        .idle => {
+            rx_stream = null;
+        },
+    }
+};
 
 test "PacketFilter processes commands" {
     wire clk: clock;

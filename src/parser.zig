@@ -166,21 +166,59 @@ pub const Parser = struct {
                     if (is_extern) {
                         _ = try self.expect(.kw_module);
                     }
+                    var params: []ast.FnParam = &.{};
+                    if (self.match(.l_paren)) {
+                        params = try self.parseFnParams(alloc, true);
+                        _ = try self.expect(.r_paren);
+                    }
                     const mod_items = try self.parseModuleBody(alloc);
-                    try decls.append(.{
-                        .tag = .module_decl,
-                        .is_pub = is_pub,
-                        .loc = name_tok.loc,
-                        .data = .{
-                            .module_decl = .{
-                                .name = name_tok.slice,
-                                .items = mod_items,
-                                .is_extern = is_extern,
-                                .foreign_name = foreign_name,
-                                .include_path = include_path,
+                    if (params.len > 0) {
+                        const mod_expr = try alloc.create(ast.Expr);
+                        mod_expr.* = .{
+                            .tag = .module_literal,
+                            .loc = name_tok.loc,
+                            .data = .{
+                                .module_literal = .{
+                                    .params = params,
+                                    .items = mod_items,
+                                    .is_extern = is_extern,
+                                    .foreign_name = foreign_name,
+                                    .include_path = include_path,
+                                },
                             },
-                        },
-                    });
+                        };
+                        try decls.append(.{
+                            .tag = .fn_decl,
+                            .is_pub = is_pub,
+                            .loc = name_tok.loc,
+                            .data = .{
+                                .fn_decl = .{
+                                    .name = name_tok.slice,
+                                    .is_pub = is_pub,
+                                    .params = params,
+                                    .return_type = null,
+                                    .body_expr = mod_expr,
+                                    .loc = name_tok.loc,
+                                },
+                            },
+                        });
+                    } else {
+                        try decls.append(.{
+                            .tag = .module_decl,
+                            .is_pub = is_pub,
+                            .loc = name_tok.loc,
+                            .data = .{
+                                .module_decl = .{
+                                    .name = name_tok.slice,
+                                    .params = params,
+                                    .items = mod_items,
+                                    .is_extern = is_extern,
+                                    .foreign_name = foreign_name,
+                                    .include_path = include_path,
+                                },
+                            },
+                        });
+                    }
                     _ = self.match(.semicolon);
                 } else {
                     const val_expr = try self.parseExpr(alloc);
@@ -201,6 +239,62 @@ pub const Parser = struct {
             } else if (self.match(.kw_fn)) {
                 const fn_decl = try self.parseFnDecl(alloc, is_pub);
                 try decls.append(fn_decl);
+            } else if (self.match(.kw_module)) {
+                const name_tok = try self.expect(.identifier);
+                var params: []ast.FnParam = &.{};
+                if (self.match(.l_paren)) {
+                    params = try self.parseFnParams(alloc, true);
+                    _ = try self.expect(.r_paren);
+                }
+                const mod_items = try self.parseModuleBody(alloc);
+                if (params.len > 0) {
+                    const mod_expr = try alloc.create(ast.Expr);
+                    mod_expr.* = .{
+                        .tag = .module_literal,
+                        .loc = name_tok.loc,
+                        .data = .{
+                            .module_literal = .{
+                                .params = params,
+                                .items = mod_items,
+                                .is_extern = false,
+                                .foreign_name = null,
+                                .include_path = null,
+                            },
+                        },
+                    };
+                    try decls.append(.{
+                        .tag = .fn_decl,
+                        .is_pub = is_pub,
+                        .loc = name_tok.loc,
+                        .data = .{
+                            .fn_decl = .{
+                                .name = name_tok.slice,
+                                .is_pub = is_pub,
+                                .params = params,
+                                .return_type = null,
+                                .body_expr = mod_expr,
+                                .loc = name_tok.loc,
+                            },
+                        },
+                    });
+                } else {
+                    try decls.append(.{
+                        .tag = .module_decl,
+                        .is_pub = is_pub,
+                        .loc = name_tok.loc,
+                        .data = .{
+                            .module_decl = .{
+                                .name = name_tok.slice,
+                                .params = params,
+                                .items = mod_items,
+                                .is_extern = false,
+                                .foreign_name = null,
+                                .include_path = null,
+                            },
+                        },
+                    });
+                }
+                _ = self.match(.semicolon);
             } else if (self.match(.kw_test)) {
                 const test_name_tok = if (self.check(.string_literal))
                     try self.expect(.string_literal)
@@ -242,10 +336,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseFnDecl(self: *Parser, alloc: std.mem.Allocator, is_pub: bool) !ast.Decl {
-        const name_tok = try self.expect(.identifier);
-        _ = try self.expect(.l_paren);
-
+    fn parseFnParams(self: *Parser, alloc: std.mem.Allocator, default_comptime: bool) ![]ast.FnParam {
         var params = ArrayList(ast.FnParam).init(alloc);
         while (!self.check(.r_paren) and !self.check(.eof)) {
             const is_comptime = self.match(.kw_comptime);
@@ -256,17 +347,60 @@ pub const Parser = struct {
             try params.append(.{
                 .name = param_name.slice,
                 .type_expr = param_type,
-                .is_comptime = is_comptime,
+                .is_comptime = is_comptime or default_comptime,
                 .loc = param_name.loc,
             });
 
             if (!self.match(.comma)) break;
         }
+        return try params.toOwnedSlice();
+    }
+
+    fn parseFnDecl(self: *Parser, alloc: std.mem.Allocator, is_pub: bool) !ast.Decl {
+        const name_tok = try self.expect(.identifier);
+        _ = try self.expect(.l_paren);
+        const params = try self.parseFnParams(alloc, false);
         _ = try self.expect(.r_paren);
 
         var ret_type: ?*ast.Type = null;
-        if (!self.check(.l_brace)) {
+        var is_module_ret = false;
+        if (self.match(.kw_module)) {
+            is_module_ret = true;
+        } else if (!self.check(.l_brace)) {
             ret_type = try self.parseType(alloc);
+        }
+
+        if (is_module_ret) {
+            const mod_items = try self.parseModuleBody(alloc);
+            const mod_expr = try alloc.create(ast.Expr);
+            mod_expr.* = .{
+                .tag = .module_literal,
+                .loc = name_tok.loc,
+                .data = .{
+                    .module_literal = .{
+                        .params = params,
+                        .items = mod_items,
+                        .is_extern = false,
+                        .foreign_name = null,
+                        .include_path = null,
+                    },
+                },
+            };
+            return .{
+                .tag = .fn_decl,
+                .is_pub = is_pub,
+                .loc = name_tok.loc,
+                .data = .{
+                    .fn_decl = .{
+                        .name = name_tok.slice,
+                        .is_pub = is_pub,
+                        .params = params,
+                        .return_type = null,
+                        .body_expr = mod_expr,
+                        .loc = name_tok.loc,
+                    },
+                },
+            };
         }
 
         _ = try self.expect(.l_brace);
@@ -290,7 +424,7 @@ pub const Parser = struct {
                 .fn_decl = .{
                     .name = name_tok.slice,
                     .is_pub = is_pub,
-                    .params = try params.toOwnedSlice(),
+                    .params = params,
                     .return_type = ret_type,
                     .body_expr = body_expr,
                     .loc = name_tok.loc,
@@ -1820,10 +1954,15 @@ pub const Parser = struct {
             return e;
         }
 
-        // Extern module literal: extern(...) module { ... }
+        // Extern module literal: extern(...) module { ... } or extern(...) module(...) { ... }
         if (self.match(.kw_extern)) {
             const meta = try self.parseExternMetadata(alloc);
             _ = try self.expect(.kw_module);
+            var params: []ast.FnParam = &.{};
+            if (self.match(.l_paren)) {
+                params = try self.parseFnParams(alloc, true);
+                _ = try self.expect(.r_paren);
+            }
             const items = try self.parseModuleBody(alloc);
             const e = try alloc.create(ast.Expr);
             e.* = .{
@@ -1831,6 +1970,7 @@ pub const Parser = struct {
                 .loc = loc,
                 .data = .{
                     .module_literal = .{
+                        .params = params,
                         .items = items,
                         .is_extern = true,
                         .foreign_name = meta.foreign_name,
@@ -1841,8 +1981,13 @@ pub const Parser = struct {
             return e;
         }
 
-        // Module literal: module { ... } (used in generic module functions)
+        // Module literal: module { ... } or module(...) { ... } (used in generic module functions)
         if (self.match(.kw_module)) {
+            var params: []ast.FnParam = &.{};
+            if (self.match(.l_paren)) {
+                params = try self.parseFnParams(alloc, true);
+                _ = try self.expect(.r_paren);
+            }
             const items = try self.parseModuleBody(alloc);
             const e = try alloc.create(ast.Expr);
             e.* = .{
@@ -1850,6 +1995,7 @@ pub const Parser = struct {
                 .loc = loc,
                 .data = .{
                     .module_literal = .{
+                        .params = params,
                         .items = items,
                         .is_extern = false,
                         .foreign_name = null,

@@ -183,6 +183,7 @@ pub const Expr = struct {
         },
         type_expr: *Type,
         module_literal: struct {
+            params: []FnParam = &.{},
             items: []ModuleItem,
             is_extern: bool = false,
             foreign_name: ?[]const u8 = null,
@@ -338,6 +339,7 @@ pub const Decl = struct {
         fn_decl: FnDecl,
         module_decl: struct {
             name: []const u8,
+            params: []FnParam = &.{},
             items: []ModuleItem,
             is_extern: bool = false,
             foreign_name: ?[]const u8 = null,

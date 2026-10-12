@@ -35,36 +35,32 @@ pub const Command = union(enum) {
     idle: void,
 };
 
-pub fn PacketFilter(comptime W: usize) type {
-    return module {
-        in clk: clock,
-        in rst_n: reset(.low),
-        in cmd: Command,
-        out rx_stream: ?u(W),
+pub const PacketFilter = module(comptime W: usize) {
+    in clk: clock,
+    in rst_n: reset(.low),
+    in cmd: Command,
+    out rx_stream: ?u(W),
 
-        reg active_header: ?PacketHeader = null;
+    reg active_header: ?PacketHeader = null;
 
-        comb {
-            switch (cmd) {
-                .ping => |echo| {
-                    rx_stream = echo; // Auto-wraps payload into valid/data stream
-                },
-                .data => |hdr| {
-                    if (hdr.isNull()) {
-                        active_header := null; // Clears optional register
-                        rx_stream = null;
-                    } else {
-                        active_header := hdr;  // ':=' schedules 1-cycle flop update
-                        rx_stream = hdr.len[7:0];
-                    }
-                },
-                .idle => {
-                    rx_stream = null;
-                },
+    switch (cmd) {
+        .ping => |echo| {
+            rx_stream = echo; // Auto-wraps payload into valid/data stream
+        },
+        .data => |hdr| {
+            if (hdr.isNull()) {
+                active_header := null; // Clears optional register
+                rx_stream = null;
+            } else {
+                active_header := hdr;  // ':=' schedules 1-cycle flop update
+                rx_stream = hdr.len[7:0];
             }
-        }
-    };
-}
+        },
+        .idle => {
+            rx_stream = null;
+        },
+    }
+};
 
 test "PacketFilter processes commands" {
     wire clk: clock;
@@ -146,8 +142,7 @@ zig build -Doptimize=ReleaseFast
 - **`packed struct`**: Bit-exact hardware layouts, struct literals `.{ ... }`, and member slicing (`s.field`).
 - **`?T` (Hardware Optionals)**: Valid + Data channels with `null` literal, auto-wrapping, and payload capture.
 - **`union(enum)`**: Hardware tagged unions with tag + payload multiplexing and `switch` pattern matching.
-- **Type Methods (`pub fn`)**: Pure combinational inlined helper functions attached directly to structs and unions.
-- **Comptime Generics (`fn(comptime ...) type`)**: Parameterized module templates monomorphized into specialized modules.
+- **Comptime Generics (`module(params)`)**: Parameterized module templates (`pub const Foo = module(W: usize) { ... };` or `pub module Foo(W: usize) { ... }`) monomorphized into specialized modules without boilerplate double-nesting.
 - **Typed Reset Polarity**: `reset(.low)` and `reset(.high)` with explicit polarity and zero name heuristics.
 - **Modern Simulation Primitives**:
   - Frequency literals (`100MHz`, `50MHz`, `1GHz`, `32kHz`) with sub-nanosecond precision.

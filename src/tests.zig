@@ -2689,6 +2689,193 @@ test "race prevention: reject multiple drivers between top-level statement and c
     try std.testing.expectError(error.MultipleDrivers, result);
 }
 
+test "parameterized module declaration with pub const Name = module(comptime W: u32) { ... }" {
+    const src =
+        \\pub const Counter = module(comptime W: u32) {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    in en: u1,
+        \\    out count: u(W),
+        \\    reg count_reg: u(W) = 0;
+        \\
+        \\    if (en) {
+        \\        count_reg := count_reg +% 1;
+        \\    }
+        \\    count = count_reg;
+        \\};
+        \\
+        \\pub const Top = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    in en: u1,
+        \\    out count8: u8,
+        \\    out count16: u16,
+        \\
+        \\    const c8 = Counter(8).instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .en = en,
+        \\        .count = count8,
+        \\    });
+        \\
+        \\    const c16 = Counter(16).instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .en = en,
+        \\        .count = count16,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("Top");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Counter_8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Counter_16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Top") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "parameterized module declaration without comptime keyword: module(W: u32)" {
+    const src =
+        \\pub const Inverter = module(W: u32) {
+        \\    in a: u(W),
+        \\    out y: u(W),
+        \\    y = ~a;
+        \\};
+        \\
+        \\pub const Top = module {
+        \\    in in4: u4,
+        \\    out out4: u4,
+        \\    const inv = Inverter(4).instantiate(.{
+        \\        .a = in4,
+        \\        .y = out4,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("Top");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Inverter_4") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "direct module return type: pub fn Name(comptime W: u32) module { ... }" {
+    const src =
+        \\pub fn Shifter(comptime W: u32) module {
+        \\    in a: u(W),
+        \\    in shamt: u2,
+        \\    out y: u(W),
+        \\    y = a << shamt;
+        \\}
+        \\
+        \\pub const Top = module {
+        \\    in data: u8,
+        \\    in sh: u2,
+        \\    out res: u8,
+        \\    const s = Shifter(8).instantiate(.{
+        \\        .a = data,
+        \\        .shamt = sh,
+        \\        .y = res,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("Top");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Shifter_8") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "first-class module keyword: pub module Name(W: u32) and pub module Concrete" {
+    const src =
+        \\pub module Adder(W: u32) {
+        \\    in a: u(W),
+        \\    in b: u(W),
+        \\    out sum: u(W),
+        \\    sum = a +% b;
+        \\}
+        \\
+        \\pub module Top {
+        \\    in a8: u8,
+        \\    in b8: u8,
+        \\    out sum8: u8,
+        \\    const add = Adder(8).instantiate(.{
+        \\        .a = a8,
+        \\        .b = b8,
+        \\        .sum = sum8,
+        \\    });
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("Top");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Adder_8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "module Top") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+
 
 
 

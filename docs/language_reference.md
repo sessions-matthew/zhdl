@@ -285,30 +285,48 @@ pub const Float16 = packed struct {
 - **Combinational Inlining**: Evaluated and inlined as combinational logic with zero simulation or runtime overhead.
 - **Top-Level Helper Functions**: `pub fn clamp_add(a: u8, b: u8) u8 { return if (a > 200) 200 else a + b; }` can be called directly in `comb` blocks.
 
-### 3.8 Comptime Generics (`fn(comptime ...) type`)
+### 3.8 Parameterized Modules & Comptime Generics (`module(params)`)
 
-ZHdl supports parameterizing hardware modules via compile-time functions returning `module { ... }`:
+ZHdl supports parameterizing hardware modules cleanly using parameterized module declarations:
 
 ```zig
-pub fn Counter(comptime W: usize) type {
-    return module {
-        in clk: clock,
-        in rst: reset,
-        in en: u1,
-        out count: u(W),
+pub const Counter = module(comptime W: usize) {
+    in clk: clock,
+    in rst: reset,
+    in en: u1,
+    out count: u(W),
 
-        reg val: u(W) = 0;
+    reg val: u(W) = 0;
 
-        comb {
-            val.next = if (en) val + 1 else val;
-            count = val;
-        }
-    };
-}
+    if (en) {
+        val := val +% 1;
+    }
+    count = val;
+};
 ```
 
+#### Syntactic Forms
+ZHdl provides three equivalent, clean ways to declare parameterized hardware modules without boilerplate double-nesting:
+1. **Parameterized Module Constant (Recommended)**:
+   ```zig
+   pub const Counter = module(comptime W: usize) { ... };
+   // Note: 'comptime' keyword is optional since module parameters are always compile-time:
+   pub const Counter = module(W: usize) { ... };
+   ```
+2. **First-Class Module Keyword**:
+   ```zig
+   pub module Counter(W: usize) { ... }
+   ```
+3. **Direct `module` Return**:
+   ```zig
+   pub fn Counter(comptime W: usize) module { ... }
+   ```
+
+> [!NOTE]
+> **Backward Compatibility**: Zig's type-function idiom (`pub fn Counter(comptime W: usize) type { return module { ... }; }`) remains 100% supported for complex metaprogramming where pre-assertions (such as `@compileError`) or conditional branching must occur before defining the module body.
+
 - **Monomorphization**: When instantiated as `Counter(8)` and `Counter(16)`, the compiler specializes independent, collision-free SystemVerilog modules `Counter_8` and `Counter_16`.
-- **Parameter Kinds**: Supports numeric parameters (`comptime W: usize`) and hardware type parameters (`comptime T: type`).
+- **Parameter Kinds**: Supports numeric parameters (`W: usize`) and hardware type parameters (`T: type`).
 - **Instantiation**:
   ```zig
   // Alias or direct instantiation
