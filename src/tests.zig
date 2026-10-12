@@ -1995,6 +1995,134 @@ test "typed reset polarity: explicit polarity without variable name deduction" {
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
 
+test "dynamic enum variant resolution without hardcoded name deduction" {
+    const src =
+        \\pub const CustomEnumMod = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    const State = enum(u3) {
+        \\        idle = 0,
+        \\        running = 1,
+        \\        waiting = 5,
+        \\        finished = 7,
+        \\    };
+        \\    in next_state: State,
+        \\    out current_code: u3,
+        \\
+        \\    reg state_reg: State = 0;
+        \\
+        \\    comb {
+        \\        state_reg.next = next_state;
+        \\        current_code = state_reg;
+        \\    }
+        \\};
+        \\
+        \\test "CustomEnumTb" {
+        \\    wire clk: clock;
+        \\    wire rst: reset;
+        \\    const State = enum(u3) {
+        \\        idle = 0,
+        \\        running = 1,
+        \\        waiting = 5,
+        \\        finished = 7,
+        \\    };
+        \\    wire next_state: State = 0;
+        \\    wire current_code: u3;
+        \\
+        \\    const dut = CustomEnumMod.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .next_state = next_state,
+        \\        .current_code = current_code,
+        \\    });
+        \\
+        \\    sim {
+        \\        clk.generate(10);
+        \\        rst.pulse(2);
+        \\        next_state = .waiting;
+        \\        step(clk, 2);
+        \\        assert(current_code == 5, "current_code should be 5 for .waiting");
+        \\        next_state = .finished;
+        \\        step(clk, 2);
+        \\        assert(current_code == 7, "current_code should be 7 for .finished");
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "next_state = 3'd5;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "next_state = 3'd7;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "strict clock domain binding: error on missing clock port" {
+    const src =
+        \\pub const NoClockModule = module {
+        \\    in data: u8,
+        \\    out result: u8,
+        \\    reg count: u8 = 0;
+        \\    comb {
+        \\        count.next = data;
+        \\        result = count;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    const res = elaborator.elaborate(null);
+    try std.testing.expectError(error.MissingClockSignal, res);
+}
+
+test "loop detection: combinational wire with _q or _d suffix is correctly caught" {
+    const src =
+        \\pub const LoopSuffix = module {
+        \\    in in_data: u8,
+        \\    out out_data: u8,
+        \\    wire test_d: u8;
+        \\    comb {
+        \\        test_d = test_d + in_data;
+        \\        out_data = test_d;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    const res = elaborator.elaborate(null);
+    try std.testing.expectError(error.CombinationalLoop, res);
+}
+
+
 
 
 

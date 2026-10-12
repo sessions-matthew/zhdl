@@ -15,6 +15,7 @@ pub const ElaborateError = error{
     MultipleDrivers,
     CombinationalLoop,
     ClockDomainCrossing,
+    MissingClockSignal,
     OutOfMemory,
 };
 
@@ -25,6 +26,8 @@ pub const Elaborator = struct {
     constants: std.StringHashMap(u64),
     allocated_struct_fields: ArrayList([]hir.HirStructField),
     allocated_union_fields: ArrayList([]hir.HirUnionField),
+    allocated_enum_variants: ArrayList([]hir.HirEnumVariant),
+    enum_variants: std.StringHashMap(u64),
     fn_decls: std.StringHashMap(ast.FnDecl),
     type_methods: std.StringHashMap(std.StringHashMap(ast.FnDecl)),
     param_env: ?*std.StringHashMap(*hir.HirExpr) = null,
@@ -46,6 +49,8 @@ pub const Elaborator = struct {
             .constants = std.StringHashMap(u64).init(allocator),
             .allocated_struct_fields = ArrayList([]hir.HirStructField).init(allocator),
             .allocated_union_fields = ArrayList([]hir.HirUnionField).init(allocator),
+            .allocated_enum_variants = ArrayList([]hir.HirEnumVariant).init(allocator),
+            .enum_variants = std.StringHashMap(u64).init(allocator),
             .fn_decls = std.StringHashMap(ast.FnDecl).init(allocator),
             .type_methods = std.StringHashMap(std.StringHashMap(ast.FnDecl)).init(allocator),
             .specialized_modules = std.StringHashMap(void).init(allocator),
@@ -61,6 +66,11 @@ pub const Elaborator = struct {
             self.allocator.free(uf);
         }
         self.allocated_union_fields.deinit();
+        for (self.allocated_enum_variants.items) |ev| {
+            self.allocator.free(ev);
+        }
+        self.allocated_enum_variants.deinit();
+        self.enum_variants.deinit();
         var tit = self.type_methods.valueIterator();
         while (tit.next()) |m_map| {
             m_map.deinit();
@@ -1226,18 +1236,13 @@ pub const Elaborator = struct {
                 const p = item.data.port;
                 const h_type = self.lowerType(p.type_expr) catch null;
                 if (h_type) |ht| {
-                    if (ht.tag == .clock or std.mem.eql(u8, p.name, "clk") or std.mem.eql(u8, p.name, "clock")) {
+                    if (ht.tag == .clock) {
                         if (default_clk_name == null) default_clk_name = p.name;
                     }
                     if (ht.tag == .reset) {
                         if (default_rst_name == null) {
                             default_rst_name = p.name;
                             default_rst_active_low = ht.is_active_low;
-                        }
-                    } else if (std.mem.eql(u8, p.name, "rst") or std.mem.eql(u8, p.name, "reset")) {
-                        if (default_rst_name == null) {
-                            default_rst_name = p.name;
-                            default_rst_active_low = false;
                         }
                     }
                     try signal_types.put(p.name, ht);
@@ -1278,8 +1283,29 @@ pub const Elaborator = struct {
 
                     const clk_str = if (r.clk != null and r.clk.?.tag == .identifier)
                         r.clk.?.data.identifier
-                    else
-                        default_clk_name orelse "clk";
+                    else blk: {
+                        if (default_clk_name) |dcn| {
+                            break :blk dcn;
+                        } else {
+                            std.debug.print(
+                                \\
+                                \\======================================================================
+                                \\COMPILE ERROR: Missing Clock Signal for Register '{s}' in module '{s}'
+                                \\======================================================================
+                                \\Register '{s}' does not specify an explicit clock, and the module
+                                \\does not declare any input port with type 'clock'.
+                                \\
+                                \\Fix:
+                                \\  1. Declare a clock port in the module:
+                                \\       in clk: clock,
+                                \\  2. Or specify the clock explicitly on the register:
+                                \\       reg(clk) {s}: ... = 0;
+                                \\======================================================================
+                                \\
+                                , .{ r.name, mod_name, r.name, r.name });
+                            return error.MissingClockSignal;
+                        }
+                    };
 
                     const rst_str: ?[]const u8 = if (r.rst != null) blk: {
                         if (r.rst.?.tag == .identifier) {
@@ -3485,13 +3511,34 @@ pub const Elaborator = struct {
                 };
             },
             .enum_type => {
+                const N = t.data.enum_type.fields.len;
                 const tag_w: u32 = if (t.data.enum_type.tag_type != null)
                     (try self.lowerType(t.data.enum_type.tag_type.?)).width
+                else if (N <= 1)
+                    1
                 else
-                    2;
+                    @intCast(std.math.log2_int_ceil(usize, N));
+
+                var variants = try self.allocator.alloc(hir.HirEnumVariant, N);
+                try self.allocated_enum_variants.append(variants);
+
+                var cur_val: u64 = 0;
+                for (t.data.enum_type.fields, 0..) |f, i| {
+                    if (f.value) |v| {
+                        cur_val = self.evalConst(v);
+                    }
+                    variants[i] = .{
+                        .name = f.name,
+                        .value = cur_val,
+                    };
+                    try self.enum_variants.put(f.name, cur_val);
+                    cur_val += 1;
+                }
+
                 return .{
                     .tag = .enum_type,
                     .width = tag_w,
+                    .enum_variants = variants,
                 };
             },
             .packed_struct => {
@@ -3577,6 +3624,7 @@ pub const Elaborator = struct {
                         .payload_width = f_payload_w,
                         .payload_type_name = f_type_name,
                     };
+                    try self.enum_variants.put(f.name, @intCast(i));
                 }
 
                 var struct_fields = try self.allocator.alloc(hir.HirStructField, 1 + N);
@@ -4060,10 +4108,18 @@ pub const Elaborator = struct {
             }
         }
 
-        // 2. Local signals that are not registers are combinational wires
+        var reg_state_signals = std.StringHashMap(void).init(alloc);
+        defer reg_state_signals.deinit();
+        var reg_it = reg_map.valueIterator();
+        while (reg_it.next()) |r| {
+            try reg_state_signals.put(r.q_name, {});
+            try reg_state_signals.put(r.d_name, {});
+        }
+
+        // 2. Local signals that are not registers or internal register nets are combinational wires
         for (local_signals) |s| {
             if (reg_map.get(s.name) != null) continue;
-            if (std.mem.endsWith(u8, s.name, "_q") or std.mem.endsWith(u8, s.name, "_d")) continue;
+            if (reg_state_signals.contains(s.name)) continue;
             try comb_signals.put(s.name, {});
         }
 
@@ -4388,11 +4444,9 @@ pub const Elaborator = struct {
     }
 
     fn getEnumVal(self: *Elaborator, name: []const u8) u64 {
-        _ = self;
-        if (std.mem.eql(u8, name, "idle")) return 0;
-        if (std.mem.eql(u8, name, "read")) return 1;
-        if (std.mem.eql(u8, name, "write")) return 2;
-        if (std.mem.eql(u8, name, "done")) return 3;
+        if (self.enum_variants.get(name)) |v| {
+            return v;
+        }
         return 0;
     }
 };
