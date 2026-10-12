@@ -39,6 +39,8 @@ pub fn main(init: std.process.Init) !void {
         const input_path = args[2];
         var output_path: ?[]const u8 = null;
         var top_module: ?[]const u8 = null;
+        var extra_includes = ArrayList([]const u8).init(allocator);
+        defer extra_includes.deinit();
 
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -50,6 +52,11 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, args[i], "--top")) {
                 if (i + 1 < args.len) {
                     top_module = args[i + 1];
+                    i += 1;
+                }
+            } else if (std.mem.eql(u8, args[i], "--include") or std.mem.eql(u8, args[i], "-I")) {
+                if (i + 1 < args.len) {
+                    try extra_includes.append(args[i + 1]);
                     i += 1;
                 }
             }
@@ -128,19 +135,52 @@ pub fn main(init: std.process.Init) !void {
             }
 
             const sim_dir = ".zhdl_sim";
+            var v_args = ArrayList([]const u8).init(allocator);
+            var alloc_strings = ArrayList([]const u8).init(allocator);
+            defer {
+                for (alloc_strings.items) |s| allocator.free(s);
+                alloc_strings.deinit();
+                v_args.deinit();
+            }
+            try v_args.appendSlice(&.{
+                "verilator",
+                "--binary",
+                "--timing",
+                "--trace",
+                "-Wno-fatal",
+                "-I.",
+            });
+            if (std.fs.path.dirname(input_path)) |dir| {
+                const inc_arg = try std.fmt.allocPrint(allocator, "-I{s}", .{dir});
+                try alloc_strings.append(inc_arg);
+                try v_args.append(inc_arg);
+            }
+            for (extra_includes.items) |inc| {
+                if (std.mem.endsWith(u8, inc, ".v") or std.mem.endsWith(u8, inc, ".sv")) {
+                    try v_args.append(inc);
+                } else {
+                    const inc_arg = try std.fmt.allocPrint(allocator, "-I{s}", .{inc});
+                    try alloc_strings.append(inc_arg);
+                    try v_args.append(inc_arg);
+                }
+            }
+            for (hir_design.external_sources) |esrc| {
+                if (std.fs.path.dirname(esrc)) |dir| {
+                    const inc_arg = try std.fmt.allocPrint(allocator, "-I{s}", .{dir});
+                    try alloc_strings.append(inc_arg);
+                    try v_args.append(inc_arg);
+                }
+            }
+            try v_args.append(target_out);
+            try v_args.appendSlice(&.{
+                "--prefix",
+                "Vtb",
+                "-Mdir",
+                sim_dir,
+            });
+
             const v_res = std.process.run(allocator, io, .{
-                .argv = &.{
-                    "verilator",
-                    "--binary",
-                    "--timing",
-                    "--trace",
-                    "-Wno-fatal",
-                    target_out,
-                    "--prefix",
-                    "Vtb",
-                    "-Mdir",
-                    sim_dir,
-                },
+                .argv = v_args.items,
             }) catch |err| {
                 std.debug.print("Failed to run verilator: {s}\n", .{@errorName(err)});
                 std.process.exit(1);
@@ -191,13 +231,44 @@ pub fn main(init: std.process.Init) !void {
         // If lint command requested, run verilator
         if (std.mem.eql(u8, command, "lint")) {
             std.debug.print("==> Running Verilator lint check on '{s}'...\n", .{target_out});
+            var v_args = ArrayList([]const u8).init(allocator);
+            var alloc_strings = ArrayList([]const u8).init(allocator);
+            defer {
+                for (alloc_strings.items) |s| allocator.free(s);
+                alloc_strings.deinit();
+                v_args.deinit();
+            }
+            try v_args.appendSlice(&.{
+                "verilator",
+                "--lint-only",
+                "-Wall",
+                "-I.",
+            });
+            if (std.fs.path.dirname(input_path)) |dir| {
+                const inc_arg = try std.fmt.allocPrint(allocator, "-I{s}", .{dir});
+                try alloc_strings.append(inc_arg);
+                try v_args.append(inc_arg);
+            }
+            for (extra_includes.items) |inc| {
+                if (std.mem.endsWith(u8, inc, ".v") or std.mem.endsWith(u8, inc, ".sv")) {
+                    try v_args.append(inc);
+                } else {
+                    const inc_arg = try std.fmt.allocPrint(allocator, "-I{s}", .{inc});
+                    try alloc_strings.append(inc_arg);
+                    try v_args.append(inc_arg);
+                }
+            }
+            for (hir_design.external_sources) |esrc| {
+                if (std.fs.path.dirname(esrc)) |dir| {
+                    const inc_arg = try std.fmt.allocPrint(allocator, "-I{s}", .{dir});
+                    try alloc_strings.append(inc_arg);
+                    try v_args.append(inc_arg);
+                }
+            }
+            try v_args.append(target_out);
+
             const run_res = std.process.run(allocator, io, .{
-                .argv = &.{
-                    "verilator",
-                    "--lint-only",
-                    "-Wall",
-                    target_out,
-                },
+                .argv = v_args.items,
             }) catch |err| {
                 std.debug.print("Failed to run verilator: {s}\n", .{@errorName(err)});
                 std.process.exit(1);
@@ -228,15 +299,16 @@ fn printUsage() void {
         \\
         \\Usage:
         \\  zhdl compile <input.zhdl> [-o <output.sv>] [--top <ModuleName>]
-        \\  zhdl test    <input.zhdl> [--trace]          (Compiles and runs simulation testbenches)
-        \\  zhdl lint    <input.zhdl> [-o <output.sv>]   (Compiles and runs Verilator --lint-only)
-        \\  zhdl check   <input.zhdl>                    (Validates syntax, types, and latch freedom)
-        \\  zhdl help                                    (Displays this help message)
+        \\  zhdl test    <input.zhdl> [--include <file.v>] [-I <dir>]  (Compiles and runs simulation testbenches)
+        \\  zhdl lint    <input.zhdl> [--include <file.v>] [-I <dir>]  (Compiles and runs Verilator --lint-only)
+        \\  zhdl check   <input.zhdl>                                  (Validates syntax, types, and latch freedom)
+        \\  zhdl help                                                  (Displays this help message)
         \\
         \\Examples:
         \\  zhdl compile examples/counter.zhdl -o counter.sv
         \\  zhdl test    examples/counter.zhdl
         \\  zhdl lint    examples/fsm.zhdl
+        \\  zhdl test    examples/ram_tb.zhdl --include vendor/ram.v
         \\
     ;
     std.debug.print("{s}", .{usage});

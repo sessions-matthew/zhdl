@@ -55,7 +55,10 @@ This document serves as the formal language specification and reference guide fo
    - [Combinational Loop Freedom (Cycle Detection)](#92-combinational-loop-freedom-dag)
    - [Clock Domain Crossing (CDC) Safety](#93-clock-domain-crossing-cdc-safety)
    - [Zero-Latch Guarantee](#94-zero-latch-guarantee)
-10. [Hierarchy & Submodule Instantiation](#10-hierarchy--submodule-instantiation)
+10. [Hierarchy, Parameterization & HDL Interoperability](#10-hierarchy-parameterization--hdl-interoperability)
+    - [Submodule Instantiation](#101-submodule-instantiation)
+    - [Parameter Passing on Instantiation](#102-parameter-passing-on-instantiation)
+    - [HDL Interoperability & Black Box Modules (`extern module`)](#103-hdl-interoperability--black-box-modules-extern-module)
 11. [Hardware Testbenches & Simulation](#11-hardware-testbenches--simulation)
     - [Testbench Structure (`test "name"`)](#111-testbench-structure)
     - [Simulation Procedures (`sim`)](#112-simulation-procedures)
@@ -711,7 +714,9 @@ Because register D-inputs automatically default to hold their Q-outputs (`reg_d 
 
 ---
 
-## 10. Hierarchy & Submodule Instantiation
+## 10. Hierarchy, Parameterization & HDL Interoperability
+
+### 10.1 Submodule Instantiation
 
 Submodules are instantiated using explicit named port bindings:
 
@@ -730,6 +735,99 @@ pub const TopModule = module {
         .ptr = wr_ptr,
     });
 };
+```
+
+### 10.2 Parameter Passing on Instantiation
+
+Parameters can be passed to parameterized submodules or black box modules using either:
+
+1. **Two-argument syntax** (parameters struct, followed by port connections struct):
+   ```zig
+   const ram = SramBlock.instantiate(
+       .{ .DATA_WIDTH = 32, .DEPTH = 1024 },
+       .{ .clk = clk, .din = din, .dout = dout },
+   );
+   ```
+
+2. **Single-argument syntax** (with explicit `.parameters` and `.ports` fields):
+   ```zig
+   const ram = SramBlock.instantiate(.{
+       .parameters = .{ .DATA_WIDTH = 32, .DEPTH = 1024 },
+       .ports = .{ .clk = clk, .din = din, .dout = dout },
+   });
+   ```
+
+Both forms lower cleanly to SystemVerilog parameterized instance syntax:
+```systemverilog
+SramBlock #(
+    .DATA_WIDTH(32'd32),
+    .DEPTH(32'd1024)
+) u_ram (
+    .clk(clk),
+    .din(din),
+    .dout(dout)
+);
+```
+
+### 10.3 HDL Interoperability & Black Box Modules (`extern module`)
+
+ZHdl supports clean, synthesizable interoperability with foreign HDL IP (Verilog, SystemVerilog, FPGA vendor primitives):
+
+#### 1. Black Box Declaration (`extern module`)
+When targeting synthesis without bringing third-party source files into the ZHdl compilation tree, declare an `extern` module:
+
+```zig
+pub const XilinxDsp = extern("DSP48E1") module {
+    const A_WIDTH: u32 = 25;
+    const B_WIDTH: u32 = 18;
+
+    in clk: clock,
+    in a: u25,
+    in b: u18,
+    out p: u43,
+};
+```
+
+ZHdl lowers this to an empty synthesizable stub with Verilator lint-off annotations:
+```systemverilog
+/* verilator lint_off DECLFILENAME */
+/* verilator lint_off UNUSEDSIGNAL */
+/* verilator lint_off UNDRIVEN */
+/* verilator lint_off UNUSEDPARAM */
+(* blackbox *) module DSP48E1 #(
+    parameter A_WIDTH = 32'd25,
+    parameter B_WIDTH = 32'd18
+) (
+    input  logic       clk,
+    input  logic [24:0] a,
+    input  logic [17:0] b,
+    output logic [42:0] p
+);
+    // Black box module interface stub
+endmodule
+/* verilator lint_on DECLFILENAME */
+/* verilator lint_on UNUSEDSIGNAL */
+/* verilator lint_on UNDRIVEN */
+/* verilator lint_on UNUSEDPARAM */
+```
+
+#### 2. External Source Inclusion (`.include`)
+To include an existing `.v` or `.sv` source file directly in behavioral simulations:
+
+```zig
+pub const Multiplier = extern("vendor_mult", .{ .include = "vendor_mult.v" }) module {
+    in a: u8,
+    in b: u8,
+    out prod: u16,
+};
+```
+
+When `.include` is provided, ZHdl emits `` `include "vendor_mult.v" `` into the generated output and automatically instructs Verilator to link and compile the external Verilog during `zhdl test` and `zhdl lint`.
+
+#### 3. CLI Source and Include Path Flags
+External files can also be passed directly to the ZHdl CLI:
+```bash
+zhdl test top.zhdl --include path/to/ip.v -I path/to/include_dir/
 ```
 
 ---

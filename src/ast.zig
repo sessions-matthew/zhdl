@@ -182,7 +182,12 @@ pub const Expr = struct {
             else_branch: *Expr,
         },
         type_expr: *Type,
-        module_literal: []ModuleItem,
+        module_literal: struct {
+            items: []ModuleItem,
+            is_extern: bool = false,
+            foreign_name: ?[]const u8 = null,
+            include_path: ?[]const u8 = null,
+        },
     },
 };
 
@@ -273,6 +278,7 @@ pub const ModuleItem = struct {
         instance: struct {
             name: []const u8,
             module_expr: *Expr,
+            parameters: []PortBinding = &.{},
             bindings: []PortBinding,
         },
         comb_block: struct {
@@ -331,6 +337,9 @@ pub const Decl = struct {
         module_decl: struct {
             name: []const u8,
             items: []ModuleItem,
+            is_extern: bool = false,
+            foreign_name: ?[]const u8 = null,
+            include_path: ?[]const u8 = null,
         },
         test_decl: struct {
             name: []const u8,

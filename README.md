@@ -113,8 +113,8 @@ zig build -Doptimize=ReleaseFast
 # Compile ZHdl to synthesizable SystemVerilog
 ./zhdl compile examples/counter.zhdl -o counter.sv
 
-# Run simulation testbench with Verilator timing backend
-./zhdl test examples/counter.zhdl
+# Run simulation testbench with Verilator timing backend (with external Verilog sources)
+./zhdl test examples/counter.zhdl --include vendor_ip.v -I ./include/
 
 # Compile and run Verilator lint check (-Wall)
 ./zhdl lint examples/uart_bridge.zhdl
@@ -152,6 +152,40 @@ zig build -Doptimize=ReleaseFast
   - Signal-centric stepping (`clk.step(5)`, `clk.posedge()`, `clk.negedge()`).
   - Dual-mode reset pulses: cycle-based (`rst.pulse(2)`) and duration-based (`rst.pulse(20ns)`).
   - Timeout assertions: `wait_for(cond, 100ns)` and `wait_for(cond, 50)`.
+
+### HDL Interoperability & Black Box Modules
+Seamlessly interface with existing Verilog, SystemVerilog, or vendor IP blocks (e.g., DSP slices, PLLs, BRAMs):
+
+```zig
+// 1. Black Box Declaration with Synthesizable Stub Generation
+pub const XilinxDsp = extern("DSP48E1") module {
+    const A_WIDTH: u32 = 25;
+    const B_WIDTH: u32 = 18;
+
+    in clk: clock,
+    in a: u25,
+    in b: u18,
+    out p: u43,
+};
+
+// 2. Direct Source Inclusion via .include
+pub const VendorMultiplier = extern("vendor_multiplier", .{ .include = "vendor_mult.v" }) module {
+    in a: u8,
+    in b: u8,
+    out prod: u16,
+};
+
+// 3. Module Parameter Overrides on Instantiation
+const dsp = XilinxDsp.instantiate(
+    .{ .A_WIDTH = 25, .B_WIDTH = 18 },       // Module parameters
+    .{ .clk = clk, .a = a, .b = b, .p = p },  // Port connections
+);
+```
+
+- **Synthesis Black Box**: Declarations without source emit `(* blackbox *) module ...` stubs guarded with Verilator lint-off directives for zero-warning EDA tool synthesis.
+- **Direct Source Inclusion**: Declarations specifying `.include = "file.v"` emit `` `include "file.v" `` and automatically link into Verilator simulations.
+- **Parameter Passing**: Full support for Verilog module parameters via 2-argument form (`.instantiate(.{ .PARAM = val }, .{ .port = clk })`) and 1-argument form (`.instantiate(.{ .parameters = .{ ... }, .ports = .{ ... } })`).
+- **CLI External Source Flags**: Pass `--include <file.v>` and `-I <dir>` to link external IP into simulation and lint runs.
 
 ---
 

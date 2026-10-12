@@ -93,6 +93,70 @@ pub const SystemVerilogEmitter = struct {
     }
 
     pub fn emitModule(self: *SystemVerilogEmitter, mod: *const hir.HirModule, writer: anytype) !void {
+        if (mod.is_extern) {
+            if (mod.include_path) |inc_path| {
+                try writer.print("`include \"{s}\"\n\n", .{inc_path});
+                return;
+            }
+
+            const foreign = mod.foreign_name orelse mod.name;
+            try writer.writeAll("/* verilator lint_off DECLFILENAME */\n");
+            try writer.writeAll("/* verilator lint_off UNUSEDSIGNAL */\n");
+            try writer.writeAll("/* verilator lint_off UNDRIVEN */\n");
+            try writer.writeAll("/* verilator lint_off UNUSEDPARAM */\n");
+            if (mod.parameters.len > 0) {
+                try writer.print("(* blackbox *) module {s} #(\n", .{foreign});
+                for (mod.parameters, 0..) |p, i| {
+                    const is_last = (i == mod.parameters.len - 1);
+                    const comma = if (is_last) "" else ",";
+                    try writer.print("    parameter {s} = ", .{p.name});
+                    try self.emitExpr(p.expr, writer);
+                    try writer.print("{s}\n", .{comma});
+                }
+                try writer.writeAll(") (\n");
+            } else {
+                try writer.print("(* blackbox *) module {s} (\n", .{foreign});
+            }
+
+            for (mod.ports, 0..) |port, i| {
+                const is_last = (i == mod.ports.len - 1);
+                const dir_str = switch (port.dir) {
+                    .in => "input ",
+                    .out => "output",
+                    .inout => "inout ",
+                };
+
+                const comma = if (is_last) "" else ",";
+
+                if (port.hir_type.tag == .array) {
+                    try writer.print("    {s} logic [{d}:0] {s} [0:{d}]{s}\n", .{
+                        dir_str,
+                        port.hir_type.elem_width - 1,
+                        port.name,
+                        port.hir_type.array_len - 1,
+                        comma,
+                    });
+                } else if (port.hir_type.width <= 1) {
+                    try writer.print("    {s} logic       {s}{s}\n", .{ dir_str, port.name, comma });
+                } else {
+                    try writer.print("    {s} logic [{d:2}:0] {s}{s}\n", .{
+                        dir_str,
+                        port.hir_type.width - 1,
+                        port.name,
+                        comma,
+                    });
+                }
+            }
+            try writer.writeAll(");\n");
+            try writer.writeAll("    // Black box module interface stub\n");
+            try writer.writeAll("endmodule\n");
+            try writer.writeAll("/* verilator lint_on DECLFILENAME */\n");
+            try writer.writeAll("/* verilator lint_on UNUSEDSIGNAL */\n");
+            try writer.writeAll("/* verilator lint_on UNDRIVEN */\n");
+            try writer.writeAll("/* verilator lint_on UNUSEDPARAM */\n\n");
+            return;
+        }
+
         try writer.print("module {s} (\n", .{mod.name});
 
         // Emit ports
@@ -189,7 +253,19 @@ pub const SystemVerilogEmitter = struct {
 
         // Emit Submodule Instances
         for (mod.instances) |inst| {
-            try writer.print("    {s} u_{s} (\n", .{ inst.module_name, inst.instance_name });
+            if (inst.parameters.len > 0) {
+                try writer.print("    {s} #(\n", .{inst.module_name});
+                for (inst.parameters, 0..) |p, i| {
+                    const is_last = (i == inst.parameters.len - 1);
+                    const comma = if (is_last) "" else ",";
+                    try writer.print("        .{s}(", .{p.name});
+                    try self.emitExpr(p.expr, writer);
+                    try writer.print("){s}\n", .{comma});
+                }
+                try writer.print("    ) u_{s} (\n", .{inst.instance_name});
+            } else {
+                try writer.print("    {s} u_{s} (\n", .{ inst.module_name, inst.instance_name });
+            }
             for (inst.connections, 0..) |c, i| {
                 const is_last = (i == inst.connections.len - 1);
                 const comma = if (is_last) "" else ",";
@@ -505,7 +581,19 @@ pub const SystemVerilogEmitter = struct {
 
         // 2. Emit instances (DUT)
         for (tb.instances) |inst| {
-            try writer.print("    {s} {s} (\n", .{ inst.module_name, inst.instance_name });
+            if (inst.parameters.len > 0) {
+                try writer.print("    {s} #(\n", .{inst.module_name});
+                for (inst.parameters, 0..) |p, i| {
+                    const is_last = (i == inst.parameters.len - 1);
+                    const comma = if (is_last) "" else ",";
+                    try writer.print("        .{s}(", .{p.name});
+                    try self.emitExpr(p.expr, writer);
+                    try writer.print("){s}\n", .{comma});
+                }
+                try writer.print("    ) {s} (\n", .{inst.instance_name});
+            } else {
+                try writer.print("    {s} {s} (\n", .{ inst.module_name, inst.instance_name });
+            }
             for (inst.connections, 0..) |conn, i| {
                 const is_last = (i == inst.connections.len - 1);
                 const comma = if (is_last) "" else ",";

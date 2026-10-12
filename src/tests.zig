@@ -799,6 +799,7 @@ fn runVerilatorLint(allocator: std.mem.Allocator, sv_source: []const u8) !void {
             "verilator",
             "--lint-only",
             "-Wall",
+            "-I.",
             tmp_path,
         },
     });
@@ -838,6 +839,7 @@ fn runVerilatorSim(allocator: std.mem.Allocator, sv_source: []const u8) !void {
             "--timing",
             "-Wno-fatal",
             "-Wno-MULTIDRIVEN",
+            "-I.",
             tmp_sv,
             "--prefix",
             "Vtb",
@@ -2257,6 +2259,247 @@ test "sim timing: clk.step, clk.posedge, clk.negedge, rst.pulse(duration), and r
     try runVerilatorLint(std.testing.allocator, sv_code);
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
+
+test "blackbox: extern module declaration and synthesizable stub generation" {
+    const src =
+        \\pub const Ibuf = extern module {
+        \\    in i: u1,
+        \\    out o: u1,
+        \\};
+        \\
+        \\pub const TopModule = module {
+        \\    in pin_in: u1,
+        \\    out core_out: u1,
+        \\
+        \\    const u_buf = Ibuf.instantiate(.{
+        \\        .i = pin_in,
+        \\        .o = core_out,
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "(* blackbox *) module Ibuf (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "input  logic       i,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "output logic       o") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "Ibuf u_u_buf (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "blackbox: extern with foreign name, parameters, and parameter passing on instantiate" {
+    const src =
+        \\pub const XilinxDsp = extern("DSP48E1") module {
+        \\    const A_WIDTH: u32 = 25;
+        \\    const B_WIDTH: u32 = 18;
+        \\
+        \\    in clk: clock,
+        \\    in a: u25,
+        \\    in b: u18,
+        \\    out p: u43,
+        \\};
+        \\
+        \\pub const FilterTop = module {
+        \\    in clk: clock,
+        \\    in data_a: u25,
+        \\    in data_b: u18,
+        \\    out result: u43,
+        \\
+        \\    const u_dsp = XilinxDsp.instantiate(.{
+        \\        .parameters = .{
+        \\            .A_WIDTH = 25,
+        \\            .B_WIDTH = 18,
+        \\        },
+        \\        .ports = .{
+        \\            .clk = clk,
+        \\            .a = data_a,
+        \\            .b = data_b,
+        \\            .p = result,
+        \\        },
+        \\    });
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "(* blackbox *) module DSP48E1 #(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "parameter A_WIDTH = 32'd25,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "DSP48E1 #(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, ".A_WIDTH(32'd25),") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, ".B_WIDTH(32'd18)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, ") u_u_dsp (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "blackbox: generic extern module function and 2-argument instantiate syntax" {
+    const src =
+        \\pub fn GenericSram(comptime data_w: u32) type {
+        \\    return extern("sram_sp") module {
+        \\        in clk: clock,
+        \\        in din: u(data_w),
+        \\        out dout: u(data_w),
+        \\    };
+        \\}
+        \\
+        \\pub const SramWrapper = module {
+        \\    in clk: clock,
+        \\    in din: u32,
+        \\    out dout: u32,
+        \\
+        \\    const ram = GenericSram(32).instantiate(
+        \\        .{ .DATA_WIDTH = 32 },
+        \\        .{ .clk = clk, .din = din, .dout = dout },
+        \\    );
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "sram_sp #(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, ".DATA_WIDTH(32'd32)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, ") u_ram (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "blackbox: external source file inclusion via .include and behavioral simulation" {
+    // 1. Write an external Verilog implementation file
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const vendor_file = "vendor_multiplier.v";
+    const vendor_v_code =
+        \\module vendor_multiplier (
+        \\    input  logic [7:0] a,
+        \\    input  logic [7:0] b,
+        \\    output logic [15:0] prod
+        \\);
+        \\    assign prod = a * b;
+        \\endmodule
+        \\
+    ;
+    const vfile = try cwd.createFile(io, vendor_file, .{});
+    try vfile.writeStreamingAll(io, vendor_v_code);
+    vfile.close(io);
+    defer cwd.deleteFile(io, vendor_file) catch {};
+
+    // 2. Declare external module with .include in ZHdl
+    const src =
+        \\pub const VendorMultiplier = extern("vendor_multiplier", .{ .include = "vendor_multiplier.v" }) module {
+        \\    in a: u8,
+        \\    in b: u8,
+        \\    out prod: u16,
+        \\};
+        \\
+        \\pub const MultiplierTop = module {
+        \\    in a: u8,
+        \\    in b: u8,
+        \\    out prod: u16,
+        \\
+        \\    const u_mult = VendorMultiplier.instantiate(.{
+        \\        .a = a,
+        \\        .b = b,
+        \\        .prod = prod,
+        \\    });
+        \\};
+        \\
+        \\pub test "SimulateVendorMultiplier" {
+        \\    wire a: u8;
+        \\    wire b: u8;
+        \\    wire prod: u16;
+        \\
+        \\    const dut = MultiplierTop.instantiate(.{
+        \\        .a = a,
+        \\        .b = b,
+        \\        .prod = prod,
+        \\    });
+        \\
+        \\    sim {
+        \\        a = 6;
+        \\        b = 7;
+        \\        delay(5);
+        \\        assert(prod == 42, "Expected 6 * 7 == 42");
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), hir_design.external_sources.len);
+    try std.testing.expectEqualStrings("vendor_multiplier.v", hir_design.external_sources[0]);
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "`include \"vendor_multiplier.v\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "vendor_multiplier u_u_mult (") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
 
 
 

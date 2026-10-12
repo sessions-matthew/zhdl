@@ -32,6 +32,8 @@ pub const Elaborator = struct {
     type_methods: std.StringHashMap(std.StringHashMap(ast.FnDecl)),
     param_env: ?*std.StringHashMap(*hir.HirExpr) = null,
     specialized_modules: std.StringHashMap(void),
+    module_foreign_names: std.StringHashMap([]const u8),
+    external_sources: std.StringHashMap(void),
 
     // Active elaboration state for dynamic register/signal injection (e.g. @sync2ff)
     active_registers: ?*ArrayList(hir.HirRegister) = null,
@@ -54,6 +56,8 @@ pub const Elaborator = struct {
             .fn_decls = std.StringHashMap(ast.FnDecl).init(allocator),
             .type_methods = std.StringHashMap(std.StringHashMap(ast.FnDecl)).init(allocator),
             .specialized_modules = std.StringHashMap(void).init(allocator),
+            .module_foreign_names = std.StringHashMap([]const u8).init(allocator),
+            .external_sources = std.StringHashMap(void).init(allocator),
         };
     }
 
@@ -77,6 +81,8 @@ pub const Elaborator = struct {
         }
         self.type_methods.deinit();
         self.specialized_modules.deinit();
+        self.module_foreign_names.deinit();
+        self.external_sources.deinit();
         self.fn_decls.deinit();
         self.types.deinit();
         self.constants.deinit();
@@ -170,6 +176,14 @@ pub const Elaborator = struct {
                         .loc = b.loc,
                     };
                 }
+                var parameters = try alloc.alloc(ast.PortBinding, inst.parameters.len);
+                for (inst.parameters, 0..) |p, i| {
+                    parameters[i] = .{
+                        .port_name = try alloc.dupe(u8, p.port_name),
+                        .expr = try self.cloneExpr(alloc, p.expr, substs),
+                        .loc = p.loc,
+                    };
+                }
                 return .{
                     .tag = .instance,
                     .loc = item.loc,
@@ -177,6 +191,7 @@ pub const Elaborator = struct {
                         .instance = .{
                             .name = try alloc.dupe(u8, inst.name),
                             .module_expr = try self.cloneExpr(alloc, inst.module_expr, substs),
+                            .parameters = parameters,
                             .bindings = bindings,
                         },
                     },
@@ -800,7 +815,12 @@ pub const Elaborator = struct {
                     .tag = .module_literal,
                     .loc = expr.loc,
                     .data = .{
-                        .module_literal = try self.cloneModuleItems(alloc, expr.data.module_literal, substs),
+                        .module_literal = .{
+                            .items = try self.cloneModuleItems(alloc, expr.data.module_literal.items, substs),
+                            .is_extern = expr.data.module_literal.is_extern,
+                            .foreign_name = if (expr.data.module_literal.foreign_name) |fnm| try alloc.dupe(u8, fnm) else null,
+                            .include_path = if (expr.data.module_literal.include_path) |inc| try alloc.dupe(u8, inc) else null,
+                        },
                     },
                 };
                 return new_e;
@@ -1070,8 +1090,17 @@ pub const Elaborator = struct {
         self.specialized_modules.put(mono_name, {}) catch return error.OutOfMemory;
 
         // Clone template items
-        const template_items = fn_decl.body_expr.data.module_literal;
+        const template_items = fn_decl.body_expr.data.module_literal.items;
         const specialized_items = self.cloneModuleItems(alloc, template_items, substs.items) catch return error.OutOfMemory;
+        const is_extern = fn_decl.body_expr.data.module_literal.is_extern;
+        const foreign_name = fn_decl.body_expr.data.module_literal.foreign_name;
+        const include_path = fn_decl.body_expr.data.module_literal.include_path;
+        if (foreign_name) |fname| {
+            self.module_foreign_names.put(mono_name, fname) catch return error.OutOfMemory;
+        }
+        if (include_path) |inc| {
+            self.external_sources.put(inc, {}) catch return error.OutOfMemory;
+        }
 
         // Register ports of this specialized module
         var mod_ports = ArrayList(hir.HirPort).init(alloc);
@@ -1094,7 +1123,16 @@ pub const Elaborator = struct {
         module_ports.put(mono_name, owned_ports) catch return error.OutOfMemory;
 
         // Elaborate the specialized module!
-        const hir_mod = try self.elaborateModule(alloc, mono_name, specialized_items, module_ports, modules);
+        const hir_mod = try self.elaborateModule(
+            alloc,
+            mono_name,
+            specialized_items,
+            module_ports,
+            modules,
+            is_extern,
+            foreign_name,
+            include_path,
+        );
         modules.append(hir_mod) catch return error.OutOfMemory;
 
         return mono_name;
@@ -1144,7 +1182,15 @@ pub const Elaborator = struct {
                         });
                     }
                 }
-                try module_ports.put(decl.data.module_decl.name, try mod_ports.toOwnedSlice());
+                const owned_ports = try mod_ports.toOwnedSlice();
+                try module_ports.put(decl.data.module_decl.name, owned_ports);
+                if (decl.data.module_decl.foreign_name) |fname| {
+                    try module_ports.put(fname, owned_ports);
+                    try self.module_foreign_names.put(decl.data.module_decl.name, fname);
+                }
+                if (decl.data.module_decl.include_path) |inc| {
+                    try self.external_sources.put(inc, {});
+                }
             }
         }
 
@@ -1152,7 +1198,7 @@ pub const Elaborator = struct {
         var target_mod_name = top_module_name;
         if (target_mod_name == null) {
             for (self.ast_tree.decls) |decl| {
-                if (decl.tag == .module_decl) {
+                if (decl.tag == .module_decl and !decl.data.module_decl.is_extern) {
                     target_mod_name = decl.data.module_decl.name;
                     break;
                 }
@@ -1161,6 +1207,14 @@ pub const Elaborator = struct {
                 for (self.ast_tree.decls) |decl| {
                     if (decl.tag == .const_decl and self.resolveGenericCall(decl.data.const_decl.val, null) != null) {
                         target_mod_name = decl.data.const_decl.name;
+                        break;
+                    }
+                }
+            }
+            if (target_mod_name == null) {
+                for (self.ast_tree.decls) |decl| {
+                    if (decl.tag == .module_decl) {
+                        target_mod_name = decl.data.module_decl.name;
                         break;
                     }
                 }
@@ -1205,8 +1259,17 @@ pub const Elaborator = struct {
 
         for (self.ast_tree.decls) |decl| {
             if (decl.tag == .module_decl) {
-                const mod_name = decl.data.module_decl.name;
-                const hir_mod = try self.elaborateModule(alloc, mod_name, decl.data.module_decl.items, &module_ports, &modules);
+                const md = decl.data.module_decl;
+                const hir_mod = try self.elaborateModule(
+                    alloc,
+                    md.name,
+                    md.items,
+                    &module_ports,
+                    &modules,
+                    md.is_extern,
+                    md.foreign_name,
+                    md.include_path,
+                );
                 try modules.append(hir_mod);
             } else if (decl.tag == .test_decl) {
                 const td = decl.data.test_decl;
@@ -1215,11 +1278,76 @@ pub const Elaborator = struct {
             }
         }
 
+        // Reconcile any instance parameters onto blackbox extern modules
+        for (modules.items) |mod| {
+            for (mod.instances) |inst| {
+                if (inst.parameters.len > 0) {
+                    for (modules.items) |*target_m| {
+                        const matches_name = std.mem.eql(u8, target_m.name, inst.module_name) or
+                            (target_m.foreign_name != null and std.mem.eql(u8, target_m.foreign_name.?, inst.module_name));
+                        if (matches_name and target_m.is_extern) {
+                            for (inst.parameters) |p| {
+                                var found = false;
+                                for (target_m.parameters) |mp| {
+                                    if (std.mem.eql(u8, mp.name, p.name)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) {
+                                    var new_params = ArrayList(hir.HirParameterBinding).init(alloc);
+                                    try new_params.appendSlice(target_m.parameters);
+                                    try new_params.append(p);
+                                    target_m.parameters = try new_params.toOwnedSlice();
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for (testbenches.items) |tb| {
+            for (tb.instances) |inst| {
+                if (inst.parameters.len > 0) {
+                    for (modules.items) |*target_m| {
+                        const matches_name = std.mem.eql(u8, target_m.name, inst.module_name) or
+                            (target_m.foreign_name != null and std.mem.eql(u8, target_m.foreign_name.?, inst.module_name));
+                        if (matches_name and target_m.is_extern) {
+                            for (inst.parameters) |p| {
+                                var found = false;
+                                for (target_m.parameters) |mp| {
+                                    if (std.mem.eql(u8, mp.name, p.name)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) {
+                                    var new_params = ArrayList(hir.HirParameterBinding).init(alloc);
+                                    try new_params.appendSlice(target_m.parameters);
+                                    try new_params.append(p);
+                                    target_m.parameters = try new_params.toOwnedSlice();
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        var ext_srcs = ArrayList([]const u8).init(alloc);
+        var src_it = self.external_sources.keyIterator();
+        while (src_it.next()) |k| {
+            try ext_srcs.append(k.*);
+        }
+
         return .{
             .arena = arena,
             .modules = try modules.toOwnedSlice(),
             .testbenches = try testbenches.toOwnedSlice(),
             .top_module = target_mod_name.?,
+            .external_sources = try ext_srcs.toOwnedSlice(),
         };
     }
 
@@ -1230,12 +1358,16 @@ pub const Elaborator = struct {
         items: []ast.ModuleItem,
         module_ports: *std.StringHashMap([]hir.HirPort),
         modules: *ArrayList(hir.HirModule),
+        is_extern: bool,
+        foreign_name: ?[]const u8,
+        include_path: ?[]const u8,
     ) !hir.HirModule {
         var ports = ArrayList(hir.HirPort).init(alloc);
         var registers = ArrayList(hir.HirRegister).init(alloc);
         var local_signals = ArrayList(hir.HirSignal).init(alloc);
         var comb_stmts = ArrayList(hir.HirStatement).init(alloc);
         var instances = ArrayList(hir.HirSubmoduleInstance).init(alloc);
+        var parameters = ArrayList(hir.HirParameterBinding).init(alloc);
 
         var reg_map = std.StringHashMap(hir.HirRegister).init(alloc);
         var signal_types = std.StringHashMap(hir.HirType).init(alloc);
@@ -1390,11 +1522,23 @@ pub const Elaborator = struct {
                         try self.registerTypeMethods(c.name, c.val.data.type_expr);
                     } else if (c.type_annot) |ta| {
                         const h_type = try self.lowerType(ta);
-                        try local_signals.append(.{ .name = c.name, .hir_type = h_type });
+                        if (!is_extern) {
+                            try local_signals.append(.{ .name = c.name, .hir_type = h_type });
+                        }
                         try signal_types.put(c.name, h_type);
+                        if (is_extern) {
+                            const const_v = self.evalConstEx(c.val, &local_consts);
+                            try local_consts.put(c.name, const_v);
+                            try self.constants.put(c.name, const_v);
+                        }
                     } else if (c.val.tag == .number) {
                         try local_consts.put(c.name, c.val.data.number.val);
                         try self.constants.put(c.name, c.val.data.number.val);
+                        if (!is_extern) {
+                            const h_type: hir.HirType = .{ .tag = .bits, .width = 32 };
+                            try local_signals.append(.{ .name = c.name, .hir_type = h_type });
+                            try signal_types.put(c.name, h_type);
+                        }
                     } else {
                         const const_v = self.evalConstEx(c.val, &local_consts);
                         if (const_v > 0) {
@@ -1402,8 +1546,17 @@ pub const Elaborator = struct {
                         }
                         const val = try self.lowerExpr(alloc, c.val, &reg_map, &signal_types);
                         const h_type = if (val.hir_type.width > 0) val.hir_type else hir.HirType{ .tag = .bits, .width = 32 };
-                        try local_signals.append(.{ .name = c.name, .hir_type = h_type });
+                        if (!is_extern) {
+                            try local_signals.append(.{ .name = c.name, .hir_type = h_type });
+                        }
                         try signal_types.put(c.name, h_type);
+                    }
+                    if (is_extern and c.val.tag != .type_expr and self.resolveGenericCall(c.val, items) == null) {
+                        const val = try self.lowerExpr(alloc, c.val, &reg_map, &signal_types);
+                        try parameters.append(.{
+                            .name = c.name,
+                            .expr = val,
+                        });
                     }
                 },
                 else => {},
@@ -1438,6 +1591,19 @@ pub const Elaborator = struct {
                     target_mod = "Submodule";
                 }
 
+                if (self.module_foreign_names.get(target_mod)) |fname| {
+                    target_mod = fname;
+                }
+
+                var params = ArrayList(hir.HirParameterBinding).init(alloc);
+                for (inst.parameters) |p| {
+                    const h_expr = try self.lowerExpr(alloc, p.expr, &reg_map, &signal_types);
+                    try params.append(.{
+                        .name = p.port_name,
+                        .expr = h_expr,
+                    });
+                }
+
                 var conns = ArrayList(hir.HirPortConnection).init(alloc);
                 for (inst.bindings) |b| {
                     const h_expr = try self.lowerExpr(alloc, b.expr, &reg_map, &signal_types);
@@ -1450,6 +1616,7 @@ pub const Elaborator = struct {
                 try instances.append(.{
                     .instance_name = inst.name,
                     .module_name = target_mod,
+                    .parameters = try params.toOwnedSlice(),
                     .connections = try conns.toOwnedSlice(),
                 });
             }
@@ -1488,6 +1655,7 @@ pub const Elaborator = struct {
         for (items) |item| {
             switch (item.tag) {
                 .const_decl => {
+                    if (is_extern) continue;
                     const c = item.data.const_decl;
                     if (c.val.tag != .number and c.val.tag != .type_expr and self.resolveGenericCall(c.val, items) == null) {
                         const target = try alloc.create(hir.HirExpr);
@@ -1570,17 +1738,23 @@ pub const Elaborator = struct {
         }
 
         // Race condition prevention:
-        // 1. Single-writer rule (no multi-driven nets, no writes to input ports)
-        try self.checkMultiDrivers(alloc, mod_name, items, ports.items, instances.items, &reg_map, module_ports);
+        if (!is_extern) {
+            // 1. Single-writer rule (no multi-driven nets, no writes to input ports)
+            try self.checkMultiDrivers(alloc, mod_name, items, ports.items, instances.items, &reg_map, module_ports);
 
-        // 2. Combinational cycle detection (no zero-delay feedback loops or ring oscillators)
-        try self.checkCombinationalLoops(alloc, mod_name, ports.items, local_signals.items, comb_stmts.items, &reg_map);
+            // 2. Combinational cycle detection (no zero-delay feedback loops or ring oscillators)
+            try self.checkCombinationalLoops(alloc, mod_name, ports.items, local_signals.items, comb_stmts.items, &reg_map);
 
-        // 3. Clock Domain Crossing (CDC) verification (no unsynchronized multi-clock domain sampling)
-        try self.checkClockDomainCrossing(alloc, mod_name, registers.items, comb_stmts.items, &reg_map);
+            // 3. Clock Domain Crossing (CDC) verification (no unsynchronized multi-clock domain sampling)
+            try self.checkClockDomainCrossing(alloc, mod_name, registers.items, comb_stmts.items, &reg_map);
+        }
 
         return .{
             .name = mod_name,
+            .is_extern = is_extern,
+            .foreign_name = foreign_name,
+            .include_path = include_path,
+            .parameters = try parameters.toOwnedSlice(),
             .ports = try ports.toOwnedSlice(),
             .registers = try registers.toOwnedSlice(),
             .local_signals = try local_signals.toOwnedSlice(),
@@ -1659,6 +1833,19 @@ pub const Elaborator = struct {
                     target_mod = "DUT";
                 }
 
+                if (self.module_foreign_names.get(target_mod)) |fname| {
+                    target_mod = fname;
+                }
+
+                var params = ArrayList(hir.HirParameterBinding).init(alloc);
+                for (inst.parameters) |p| {
+                    const h_expr = try self.lowerExpr(alloc, p.expr, &reg_map, &signal_types);
+                    try params.append(.{
+                        .name = p.port_name,
+                        .expr = h_expr,
+                    });
+                }
+
                 var conns = ArrayList(hir.HirPortConnection).init(alloc);
                 for (inst.bindings) |b| {
                     const h_expr = try self.lowerExpr(alloc, b.expr, &reg_map, &signal_types);
@@ -1671,6 +1858,7 @@ pub const Elaborator = struct {
                 try instances.append(.{
                     .instance_name = inst.name,
                     .module_name = target_mod,
+                    .parameters = try params.toOwnedSlice(),
                     .connections = try conns.toOwnedSlice(),
                 });
             }

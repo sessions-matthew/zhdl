@@ -53,6 +53,7 @@ pub const TokenType = enum {
     kw_null,
     kw_and,
     kw_or,
+    kw_extern,
 
     // Builtins (starting with '@')
     builtin_import,
@@ -169,6 +170,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "null", .kw_null },
     .{ "and", .kw_and },
     .{ "or", .kw_or },
+    .{ "extern", .kw_extern },
 });
 
 pub const builtins = std.StaticStringMap(TokenType).initComptime(.{

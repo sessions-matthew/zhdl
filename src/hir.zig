@@ -204,14 +204,24 @@ pub const HirPortConnection = struct {
     expr: *HirExpr,
 };
 
+pub const HirParameterBinding = struct {
+    name: []const u8,
+    expr: *HirExpr,
+};
+
 pub const HirSubmoduleInstance = struct {
     instance_name: []const u8,
     module_name: []const u8,
+    parameters: []HirParameterBinding = &.{},
     connections: []HirPortConnection,
 };
 
 pub const HirModule = struct {
     name: []const u8,
+    is_extern: bool = false,
+    foreign_name: ?[]const u8 = null,
+    include_path: ?[]const u8 = null,
+    parameters: []HirParameterBinding = &.{},
     ports: []HirPort,
     registers: []HirRegister,
     local_signals: []HirSignal,
@@ -305,6 +315,7 @@ pub const HirDesign = struct {
     modules: []HirModule,
     testbenches: []HirTestbench,
     top_module: []const u8,
+    external_sources: [][]const u8 = &.{},
 
     pub fn deinit(self: *HirDesign) void {
         self.arena.deinit();

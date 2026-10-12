@@ -70,6 +70,68 @@ pub const Parser = struct {
         return error.UnexpectedToken;
     }
 
+    const ExternMetadata = struct {
+        foreign_name: ?[]const u8 = null,
+        include_path: ?[]const u8 = null,
+    };
+
+    fn parseExternMetadata(self: *Parser, alloc: std.mem.Allocator) ParseError!ExternMetadata {
+        var meta = ExternMetadata{};
+        if (self.match(.l_paren)) {
+            if (self.check(.string_literal)) {
+                const str_tok = self.expect(.string_literal) catch return error.UnexpectedToken;
+                var s = str_tok.slice;
+                if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') {
+                    s = s[1 .. s.len - 1];
+                }
+                meta.foreign_name = s;
+                if (self.match(.comma)) {
+                    if (self.match(.dot)) {
+                        _ = self.expect(.l_brace) catch return error.UnexpectedToken;
+                        while (!self.check(.r_brace) and !self.check(.eof)) {
+                            _ = self.expect(.dot) catch return error.UnexpectedToken;
+                            const opt_name = self.expect(.identifier) catch return error.UnexpectedToken;
+                            _ = self.expect(.equal) catch return error.UnexpectedToken;
+                            if (std.mem.eql(u8, opt_name.slice, "include")) {
+                                const inc_tok = self.expect(.string_literal) catch return error.UnexpectedToken;
+                                var inc = inc_tok.slice;
+                                if (inc.len >= 2 and inc[0] == '"' and inc[inc.len - 1] == '"') {
+                                    inc = inc[1 .. inc.len - 1];
+                                }
+                                meta.include_path = inc;
+                            } else {
+                                _ = try self.parseExpr(alloc);
+                            }
+                            if (!self.match(.comma)) break;
+                        }
+                        _ = self.expect(.r_brace) catch return error.UnexpectedToken;
+                    }
+                }
+            } else if (self.match(.dot)) {
+                _ = self.expect(.l_brace) catch return error.UnexpectedToken;
+                while (!self.check(.r_brace) and !self.check(.eof)) {
+                    _ = self.expect(.dot) catch return error.UnexpectedToken;
+                    const opt_name = self.expect(.identifier) catch return error.UnexpectedToken;
+                    _ = self.expect(.equal) catch return error.UnexpectedToken;
+                    if (std.mem.eql(u8, opt_name.slice, "include")) {
+                        const inc_tok = self.expect(.string_literal) catch return error.UnexpectedToken;
+                        var inc = inc_tok.slice;
+                        if (inc.len >= 2 and inc[0] == '"' and inc[inc.len - 1] == '"') {
+                            inc = inc[1 .. inc.len - 1];
+                        }
+                        meta.include_path = inc;
+                    } else {
+                        _ = try self.parseExpr(alloc);
+                    }
+                    if (!self.match(.comma)) break;
+                }
+                _ = self.expect(.r_brace) catch return error.UnexpectedToken;
+            }
+            _ = self.expect(.r_paren) catch return error.UnexpectedToken;
+        }
+        return meta;
+    }
+
     pub fn parse(self: *Parser) !ast.AST {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
@@ -88,8 +150,22 @@ pub const Parser = struct {
                 }
                 _ = try self.expect(.equal);
 
-                // Check if this is a module definition: pub const Name = module { ... };
-                if (self.match(.kw_module)) {
+                // Check if this is a module or extern module definition: pub const Name = [extern(...)] module { ... };
+                var is_extern = false;
+                var foreign_name: ?[]const u8 = null;
+                var include_path: ?[]const u8 = null;
+
+                if (self.match(.kw_extern)) {
+                    is_extern = true;
+                    const meta = try self.parseExternMetadata(alloc);
+                    foreign_name = meta.foreign_name;
+                    include_path = meta.include_path;
+                }
+
+                if (is_extern or self.match(.kw_module)) {
+                    if (is_extern) {
+                        _ = try self.expect(.kw_module);
+                    }
                     const mod_items = try self.parseModuleBody(alloc);
                     try decls.append(.{
                         .tag = .module_decl,
@@ -99,6 +175,9 @@ pub const Parser = struct {
                             .module_decl = .{
                                 .name = name_tok.slice,
                                 .items = mod_items,
+                                .is_extern = is_extern,
+                                .foreign_name = foreign_name,
+                                .include_path = include_path,
                             },
                         },
                     });
@@ -410,6 +489,10 @@ pub const Parser = struct {
         } else if (self.match(.kw_const)) {
                 // const rx = uart.Rx(...).instantiate(.{ ... }); OR const W = 8;
                 const const_name = try self.expect(.identifier);
+                var const_type: ?*ast.Type = null;
+                if (self.match(.colon)) {
+                    const_type = try self.parseType(alloc);
+                }
                 _ = try self.expect(.equal);
                 const expr = try self.parseExpr(alloc);
                 _ = try self.expect(.semicolon);
@@ -420,15 +503,66 @@ pub const Parser = struct {
                 {
                     const mod_expr = expr.data.call.callee.data.member_access.target;
                     var bindings = ArrayList(ast.PortBinding).init(alloc);
-                    if (expr.data.call.args.len > 0 and expr.data.call.args[0].tag == .struct_init) {
-                        for (expr.data.call.args[0].data.struct_init.fields) |f| {
-                            try bindings.append(.{
-                                .port_name = f.name,
-                                .expr = f.value,
-                                .loc = f.loc,
-                            });
+                    var parameters = ArrayList(ast.PortBinding).init(alloc);
+
+                    if (expr.data.call.args.len == 1) {
+                        const arg0 = expr.data.call.args[0];
+                        if (arg0.tag == .struct_init) {
+                            var has_ports_or_params = false;
+                            for (arg0.data.struct_init.fields) |f| {
+                                if (std.mem.eql(u8, f.name, "ports") and f.value.tag == .struct_init) {
+                                    has_ports_or_params = true;
+                                    for (f.value.data.struct_init.fields) |pf| {
+                                        try bindings.append(.{
+                                            .port_name = pf.name,
+                                            .expr = pf.value,
+                                            .loc = pf.loc,
+                                        });
+                                    }
+                                } else if (std.mem.eql(u8, f.name, "parameters") and f.value.tag == .struct_init) {
+                                    has_ports_or_params = true;
+                                    for (f.value.data.struct_init.fields) |pmf| {
+                                        try parameters.append(.{
+                                            .port_name = pmf.name,
+                                            .expr = pmf.value,
+                                            .loc = pmf.loc,
+                                        });
+                                    }
+                                }
+                            }
+                            if (!has_ports_or_params) {
+                                for (arg0.data.struct_init.fields) |f| {
+                                    try bindings.append(.{
+                                        .port_name = f.name,
+                                        .expr = f.value,
+                                        .loc = f.loc,
+                                    });
+                                }
+                            }
+                        }
+                    } else if (expr.data.call.args.len >= 2) {
+                        const arg0 = expr.data.call.args[0];
+                        const arg1 = expr.data.call.args[1];
+                        if (arg0.tag == .struct_init) {
+                            for (arg0.data.struct_init.fields) |f| {
+                                try parameters.append(.{
+                                    .port_name = f.name,
+                                    .expr = f.value,
+                                    .loc = f.loc,
+                                });
+                            }
+                        }
+                        if (arg1.tag == .struct_init) {
+                            for (arg1.data.struct_init.fields) |f| {
+                                try bindings.append(.{
+                                    .port_name = f.name,
+                                    .expr = f.value,
+                                    .loc = f.loc,
+                                });
+                            }
                         }
                     }
+
                     try items.append(.{
                         .tag = .instance,
                         .loc = item_loc,
@@ -436,6 +570,7 @@ pub const Parser = struct {
                             .instance = .{
                                 .name = const_name.slice,
                                 .module_expr = mod_expr,
+                                .parameters = try parameters.toOwnedSlice(),
                                 .bindings = try bindings.toOwnedSlice(),
                             },
                         },
@@ -447,7 +582,7 @@ pub const Parser = struct {
                         .data = .{
                             .const_decl = .{
                                 .name = const_name.slice,
-                                .type_annot = null,
+                                .type_annot = const_type,
                                 .val = expr,
                             },
                         },
@@ -1668,6 +1803,27 @@ pub const Parser = struct {
             return e;
         }
 
+        // Extern module literal: extern(...) module { ... }
+        if (self.match(.kw_extern)) {
+            const meta = try self.parseExternMetadata(alloc);
+            _ = try self.expect(.kw_module);
+            const items = try self.parseModuleBody(alloc);
+            const e = try alloc.create(ast.Expr);
+            e.* = .{
+                .tag = .module_literal,
+                .loc = loc,
+                .data = .{
+                    .module_literal = .{
+                        .items = items,
+                        .is_extern = true,
+                        .foreign_name = meta.foreign_name,
+                        .include_path = meta.include_path,
+                    },
+                },
+            };
+            return e;
+        }
+
         // Module literal: module { ... } (used in generic module functions)
         if (self.match(.kw_module)) {
             const items = try self.parseModuleBody(alloc);
@@ -1676,7 +1832,12 @@ pub const Parser = struct {
                 .tag = .module_literal,
                 .loc = loc,
                 .data = .{
-                    .module_literal = items,
+                    .module_literal = .{
+                        .items = items,
+                        .is_extern = false,
+                        .foreign_name = null,
+                        .include_path = null,
+                    },
                 },
             };
             return e;
