@@ -2451,7 +2451,16 @@ pub const Elaborator = struct {
                             }
 
                             if (payload_w > 0) {
-                                const cap_type = hir.HirType{ .tag = .bits, .width = payload_w };
+                                var cap_type = hir.HirType{ .tag = .bits, .width = payload_w };
+                                if (c.patterns.len > 0 and c.patterns[0].tag == .enum_literal) {
+                                    if (target.hir_type.getUnionField(c.patterns[0].data.enum_literal)) |uf| {
+                                        if (uf.payload_type_name.len > 0) {
+                                            if (self.types.get(uf.payload_type_name)) |found_t| {
+                                                cap_type = found_t;
+                                            }
+                                        }
+                                    }
+                                }
 
                                 var found = false;
                                 for (local_signals.items) |*sig| {
@@ -3328,14 +3337,22 @@ pub const Elaborator = struct {
                 try self.allocated_union_fields.append(union_fields);
 
                 for (u_data.fields, 0..) |f, i| {
-                    const f_payload_w: u32 = if (f.type_expr) |te|
-                        (try self.lowerType(te)).width
-                    else
-                        0;
+                    var f_payload_w: u32 = 0;
+                    var f_type_name: []const u8 = "";
+                    if (f.type_expr) |te| {
+                        const ft = try self.lowerType(te);
+                        f_payload_w = ft.width;
+                        if (te.tag == .named) {
+                            f_type_name = te.data.named;
+                        } else if (ft.name.len > 0) {
+                            f_type_name = ft.name;
+                        }
+                    }
                     union_fields[i] = .{
                         .name = f.name,
                         .tag_value = @intCast(i),
                         .payload_width = f_payload_w,
+                        .payload_type_name = f_type_name,
                     };
                 }
 

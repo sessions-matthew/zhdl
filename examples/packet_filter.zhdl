@@ -1,0 +1,75 @@
+pub const PacketHeader = packed struct {
+    tag: u4,
+    len: u12,
+
+    pub fn isNull(self: PacketHeader) u1 {
+        return self.tag == 0;
+    }
+};
+
+pub const Command = union(enum) {
+    ping: u8,
+    data: PacketHeader,
+    idle: void,
+};
+
+pub fn PacketFilter(comptime W: usize) type {
+    return module {
+        in clk: clock,
+        in rst: reset,
+        in cmd: Command,
+        out rx_stream: ?u(W),
+
+        reg active_header: ?PacketHeader = null;
+
+        comb {
+            switch (cmd) {
+                .ping => |echo| {
+                    rx_stream = echo; // Auto-wraps payload into valid/data stream
+                },
+                .data => |hdr| {
+                    if (hdr.isNull()) {
+                        active_header := null; // Clears optional register
+                        rx_stream = null;
+                    } else {
+                        active_header := hdr;  // ':=' schedules 1-cycle flop update
+                        rx_stream = hdr.len[7:0];
+                    }
+                },
+                .idle => {
+                    rx_stream = null;
+                },
+            }
+        }
+    };
+}
+
+test "PacketFilter processes commands" {
+    wire clk: clock;
+    wire rst: reset;
+    wire cmd: Command;
+    wire rx_stream: ?u8;
+
+    const dut = PacketFilter(8).instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .cmd = cmd,
+        .rx_stream = rx_stream,
+    });
+
+    sim {
+        clk.generate(10);
+        trace("filter_tb.vcd");
+        rst.pulse(2);
+
+        cmd = Command{ .ping = 0xA5 };
+        step(clk, 1);
+        assert(rx_stream.valid == 1, "Should be valid");
+        assert(rx_stream.data == 0xA5, "Should echo ping");
+
+        cmd = Command{ .idle = 0 };
+        step(clk, 1);
+        assert(rx_stream.valid == 0, "Should be idle/null");
+        finish();
+    }
+}

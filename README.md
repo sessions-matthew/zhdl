@@ -20,47 +20,78 @@ A modern **Hardware Description Language (HDL)** inspired by **Zig**, compiling 
 ## Quick Look
 
 ```zig
-pub const Counter = module {
-    in clk: clock,
-    in rst: reset,
-    in en: u1,
-    out count: u8,
-    out overflow: u1,
-    out rev_nibble: u4,
+pub const PacketHeader = packed struct {
+    tag: u4,
+    len: u12,
 
-    reg count_reg: u8 = 0;
-
-    comb {
-        overflow = (count_reg == 255);
-        if (en) {
-            count_reg := count_reg +% 1; // ':=' schedules 1-cycle flop update
-        }
-        count = count_reg;
-        rev_nibble = count_reg[4..0];    // Downward slicing: bits [3:0] in reverse order
+    pub fn isNull(self: PacketHeader) u1 {
+        return self.tag == 0;
     }
 };
 
-test "Counter increments and rolls over" {
+pub const Command = union(enum) {
+    ping: u8,
+    data: PacketHeader,
+    idle: void,
+};
+
+pub fn PacketFilter(comptime W: usize) type {
+    return module {
+        in clk: clock,
+        in rst: reset,
+        in cmd: Command,
+        out rx_stream: ?u(W),
+
+        reg active_header: ?PacketHeader = null;
+
+        comb {
+            switch (cmd) {
+                .ping => |echo| {
+                    rx_stream = echo; // Auto-wraps payload into valid/data stream
+                },
+                .data => |hdr| {
+                    if (hdr.isNull()) {
+                        active_header := null; // Clears optional register
+                        rx_stream = null;
+                    } else {
+                        active_header := hdr;  // ':=' schedules 1-cycle flop update
+                        rx_stream = hdr.len[7:0];
+                    }
+                },
+                .idle => {
+                    rx_stream = null;
+                },
+            }
+        }
+    };
+}
+
+test "PacketFilter processes commands" {
     wire clk: clock;
     wire rst: reset;
-    wire en: u1;
-    wire count: u8;
-    wire overflow: u1;
-    wire rev_nibble: u4;
+    wire cmd: Command;
+    wire rx_stream: ?u8;
 
-    const dut = Counter.instantiate(.{
-        .clk = clk, .rst = rst, .en = en,
-        .count = count, .overflow = overflow, .rev_nibble = rev_nibble,
+    const dut = PacketFilter(8).instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .cmd = cmd,
+        .rx_stream = rx_stream,
     });
 
     sim {
         clk.generate(10);
-        trace("counter_tb.vcd");
+        trace("filter_tb.vcd");
         rst.pulse(2);
 
-        en = 1;
-        step(clk, 10);
-        assert(count == 10, "Counter should reach 10");
+        cmd = Command{ .ping = 0xA5 };
+        step(clk, 1);
+        assert(rx_stream.valid == 1, "Should be valid");
+        assert(rx_stream.data == 0xA5, "Should echo ping");
+
+        cmd = Command{ .idle = 0 };
+        step(clk, 1);
+        assert(rx_stream.valid == 0, "Should be idle/null");
         finish();
     }
 }

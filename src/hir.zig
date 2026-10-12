@@ -34,6 +34,7 @@ pub const HirUnionField = struct {
     name: []const u8,
     tag_value: u64,
     payload_width: u32,
+    payload_type_name: []const u8 = "",
 };
 
 pub const HirType = struct {
