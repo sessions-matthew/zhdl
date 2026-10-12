@@ -75,21 +75,19 @@ test "PacketFilter processes commands" {
         .rx_stream = rx_stream,
     });
 
-    sim {
-        clk.generate(100MHz); // First-class frequency literal (10ns period)
-        trace("filter_tb.vcd");
-        rst_n.pulse(20ns);    // Asynchronous real-time reset pulse
+    clk.generate(100MHz); // First-class frequency literal (10ns period)
+    trace("filter_tb.vcd");
+    rst_n.pulse(20ns);    // Asynchronous real-time reset pulse
 
-        cmd = Command{ .ping = 0xA5 };
-        clk.step();           // Synchronous 1-cycle clock step
-        assert(rx_stream.valid == 1, "Should be valid");
-        assert(rx_stream.data == 0xA5, "Should echo ping");
+    cmd = Command{ .ping = 0xA5 };
+    clk.step();           // Synchronous 1-cycle clock step
+    assert(rx_stream.valid == 1, "Should be valid");
+    assert(rx_stream.data == 0xA5, "Should echo ping");
 
-        cmd = Command{ .idle = 0 };
-        clk.step();
-        assert(rx_stream.valid == 0, "Should be idle/null");
-        finish();
-    }
+    cmd = Command{ .idle = 0 };
+    clk.step();
+    assert(rx_stream.valid == 0, "Should be idle/null");
+    finish();
 }
 ```
 
