@@ -392,18 +392,35 @@ Registers automatically split into:
 
 ## 5. Procedural Blocks & Execution Semantics
 
-### 5.1 Combinational Blocks (`comb`)
+### 5.1 Procedural Execution & Optional `comb` Blocks
 
-Combinational logic is written inside `comb { ... }` blocks. Statements inside execute conceptually in zero simulation time and synthesize to IEEE 1800 `always_comb`:
+ZHdl supports **flat, boilerplate-free module bodies**: dedicated `comb { ... }` wrappers are **completely optional**. Statements, assignments, conditionals, and control flow can be written directly at the module top level:
 
 ```zig
-comb {
+pub const Counter = module {
+    in clk: clock,
+    in rst: reset,
+    in en: u1,
+    out count: u8,
+
+    reg r_count: u8 = 0;
+
+    // Flat procedural statements (no comb { ... } wrapper required!)
     if (en) {
-        count.next = count +% 1;
+        r_count := r_count +% 1;
     }
-    out_valid = (count == 255);
-}
+    count = r_count;
+};
 ```
+
+For backward compatibility and local lexical scoping, explicit `comb { ... }` blocks and anonymous `{ ... }` blocks are fully supported and lower into the same unified evaluation domain.
+
+#### Race-Condition & Hazard Prevention Guarantees:
+When writing top-level procedural statements, the compiler statically prevents simulation/synthesis hazards:
+1. **Unified Behavioral Domain**: All top-level logic and blocks merge into **exactly one** SystemVerilog `always_comb` process, completely eliminating simulator delta-cycle event races.
+2. **Static Read-Before-Write Verification**: Reading a combinational wire before it has been assigned in the procedural stream is rejected at compile time with `COMPILE ERROR: Read-Before-Write Hazard on Signal '...'`. Clocked registers (`reg`) read their stable previous-cycle output $Q$ and are always safe to read anywhere.
+3. **Strict Operator Discipline (`:=` vs `=`)**: The compiler strictly reserves `:=` for registers (`always_ff` non-blocking) and `=` for wires (`always_comb` blocking).
+4. **Single-Writer Rule**: Multiple drivers on the same wire across top-level statements, continuous wires, or blocks are rejected before code emission.
 
 ### 5.2 Register Updates (`:=` and `reg.next`)
 

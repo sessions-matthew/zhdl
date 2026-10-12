@@ -649,14 +649,31 @@ pub const Parser = struct {
                         },
                     },
                 });
-            } else {
-                std.debug.print("Unexpected token in module: {s} ('{s}') at {d}:{d}\n", .{
-                    @tagName(self.current.tag),
-                    self.current.slice,
-                    self.current.loc.line,
-                    self.current.loc.col,
+            } else if (self.check(.l_brace)) {
+                _ = try self.expect(.l_brace);
+                var stmts = ArrayList(ast.Statement).init(alloc);
+                while (!self.check(.r_brace) and !self.check(.eof)) {
+                    try stmts.append(try self.parseStatement(alloc));
+                }
+                _ = try self.expect(.r_brace);
+                try items.append(.{
+                    .tag = .comb_block,
+                    .loc = item_loc,
+                    .data = .{
+                        .comb_block = .{
+                            .stmts = try stmts.toOwnedSlice(),
+                        },
+                    },
                 });
-                return error.UnexpectedToken;
+            } else {
+                const stmt = try self.parseStatement(alloc);
+                try items.append(.{
+                    .tag = .stmt,
+                    .loc = item_loc,
+                    .data = .{
+                        .stmt = stmt,
+                    },
+                });
             }
         }
         _ = try self.expect(.r_brace);

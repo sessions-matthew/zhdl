@@ -1,4 +1,5 @@
 //! Parameterized Counter with Reset, Enable, Overflow, and Downward Bit Slicing
+//! Demonstrates optional flat module syntax (no 'comb' block wrapper required).
 pub const Counter = module {
     in clk: clock,
     in rst: reset,
@@ -9,18 +10,16 @@ pub const Counter = module {
 
     reg count_reg: u8 = 0;
 
-    comb {
-        overflow = (count_reg == 255);
+    overflow = (count_reg == 255);
 
-        if (en) {
-            count_reg := count_reg +% 1;
-        }
-
-        count = count_reg;
-
-        // Downward bit slicing syntactic sugar: extracts lower 4 bits in reverse bit order!
-        rev_nibble = count_reg[4..0];
+    if (en) {
+        count_reg := count_reg +% 1;
     }
+
+    count = count_reg;
+
+    // Downward bit slicing syntactic sugar: extracts lower 4 bits in reverse bit order!
+    rev_nibble = count_reg[4..0];
 };
 
 test "Counter increments and rolls over at 255" {

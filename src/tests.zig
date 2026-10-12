@@ -2538,6 +2538,158 @@ test "sized number literals width inference and concatenation" {
     try runVerilatorLint(std.testing.allocator, sv_code);
 }
 
+test "optional comb: module with top-level statements and registers" {
+    const src =
+        \\pub const FlatCounter = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    out count: u8,
+        \\
+        \\    reg r_count: u8 = 0;
+        \\
+        \\    r_count := r_count +% 1;
+        \\    count = r_count;
+        \\};
+        \\
+        \\test "FlatCounter TB" {
+        \\    wire clk: clock;
+        \\    wire rst: reset;
+        \\    wire count: u8;
+        \\
+        \\    const dut = FlatCounter.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .count = count,
+        \\    });
+        \\
+        \\    sim {
+        \\        clk.generate(100MHz);
+        \\        rst.pulse(20ns);
+        \\        clk.step(5);
+        \\        clk.negedge();
+        \\        assert(count == 5, "Counter should have advanced 5 cycles");
+        \\        finish();
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always_comb begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "r_count_d = (r_count_q + 8'd1);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "count = r_count_q;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "optional comb: anonymous block and top-level control flow" {
+    const src =
+        \\pub const ControlModule = module {
+        \\    in a: u8,
+        \\    in b: u8,
+        \\    in sel: u1,
+        \\    out res: u8,
+        \\
+        \\    // Anonymous block without comb keyword
+        \\    {
+        \\        if (sel) {
+        \\            res = a +% b;
+        \\        } else {
+        \\            res = a -% b;
+        \\        }
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always_comb begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "if (sel) begin") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "race prevention: reject read-before-write hazard on combinational wire" {
+    const src =
+        \\pub const ReadBeforeWriteMod = module {
+        \\    in a: u8,
+        \\    out b: u8,
+        \\    out c: u8,
+        \\
+        \\    b = c + 1; // Hazard: 'c' read before being assigned below!
+        \\    c = a * 2;
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    const result = elaborator.elaborate(null);
+    try std.testing.expectError(error.ReadBeforeWriteHazard, result);
+}
+
+test "race prevention: reject multiple drivers between top-level statement and comb block" {
+    const src =
+        \\pub const MultiDriverMod = module {
+        \\    in a: u8,
+        \\    out y: u8,
+        \\
+        \\    y = a;
+        \\
+        \\    comb {
+        \\        y = a + 1;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    const result = elaborator.elaborate(null);
+    try std.testing.expectError(error.MultipleDrivers, result);
+}
+
+
 
 
 

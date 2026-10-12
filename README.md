@@ -141,6 +141,8 @@ zig build -Doptimize=ReleaseFast
 - **Downward Slicing (`x[4..0]`)**: Reverse-order bit extraction with zero logic gates.
 
 ### Zig-Inspired Type System & Verification
+- **Optional `comb` Blocks & Flat Modules**: Write procedural statements, assignments, and control flow directly at module level without boilerplate `comb { ... }` wrappers.
+- **Race-Condition & Read-Before-Write Prevention**: Static analysis verifies combinational wires are written before read, and unifies all module logic into a single procedural domain to prevent delta-cycle races.
 - **`packed struct`**: Bit-exact hardware layouts, struct literals `.{ ... }`, and member slicing (`s.field`).
 - **`?T` (Hardware Optionals)**: Valid + Data channels with `null` literal, auto-wrapping, and payload capture.
 - **`union(enum)`**: Hardware tagged unions with tag + payload multiplexing and `switch` pattern matching.

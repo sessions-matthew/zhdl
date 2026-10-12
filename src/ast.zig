@@ -256,6 +256,7 @@ pub const ModuleItemTag = enum {
     sync_block,
     const_decl,
     sim_block,
+    stmt,
 };
 
 pub const ModuleItem = struct {
@@ -297,6 +298,7 @@ pub const ModuleItem = struct {
         sim_block: struct {
             stmts: []Statement,
         },
+        stmt: Statement,
     },
 };
 

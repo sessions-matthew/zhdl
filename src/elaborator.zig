@@ -247,6 +247,17 @@ pub const Elaborator = struct {
                     },
                 };
             },
+            .stmt => {
+                var single = [1]ast.Statement{item.data.stmt};
+                const cloned = try self.cloneStatements(alloc, &single, substs);
+                return .{
+                    .tag = .stmt,
+                    .loc = item.loc,
+                    .data = .{
+                        .stmt = cloned[0],
+                    },
+                };
+            },
         }
     }
 
@@ -1401,6 +1412,14 @@ pub const Elaborator = struct {
                         try signal_types.put(c.name, ht);
                     }
                 }
+            } else if (item.tag == .stmt and item.data.stmt.tag == .var_decl) {
+                const vd = item.data.stmt.data.var_decl;
+                if (vd.type_annot) |ta| {
+                    const h_type = self.lowerType(ta) catch null;
+                    if (h_type) |ht| {
+                        try signal_types.put(vd.name, ht);
+                    }
+                }
             }
         }
 
@@ -1685,6 +1704,9 @@ pub const Elaborator = struct {
                         try self.lowerStatement(alloc, stmt, &comb_stmts, &local_signals, &reg_map, &signal_types);
                     }
                 },
+                .stmt => {
+                    try self.lowerStatement(alloc, item.data.stmt, &comb_stmts, &local_signals, &reg_map, &signal_types);
+                },
                 .sync_block => {
                     const sb = item.data.sync_block;
                     const clk_str = if (sb.clk.tag == .identifier) sb.clk.data.identifier else "clk";
@@ -1745,7 +1767,10 @@ pub const Elaborator = struct {
             // 2. Combinational cycle detection (no zero-delay feedback loops or ring oscillators)
             try self.checkCombinationalLoops(alloc, mod_name, ports.items, local_signals.items, comb_stmts.items, &reg_map);
 
-            // 3. Clock Domain Crossing (CDC) verification (no unsynchronized multi-clock domain sampling)
+            // 3. Read-before-write analysis (prevent delta-cycle simulation races & uninitialized nets)
+            try self.checkReadBeforeWrite(alloc, mod_name, ports.items, local_signals.items, comb_stmts.items, &reg_map, instances.items, module_ports);
+
+            // 4. Clock Domain Crossing (CDC) verification (no unsynchronized multi-clock domain sampling)
             try self.checkClockDomainCrossing(alloc, mod_name, registers.items, comb_stmts.items, &reg_map);
         }
 
@@ -4423,7 +4448,75 @@ pub const Elaborator = struct {
             }
         }
 
-        // 4. Check comb blocks
+        // 4. Check top-level procedural statements
+        var top_level_written = std.StringHashMap(void).init(alloc);
+        defer top_level_written.deinit();
+
+        for (items) |item| {
+            if (item.tag == .stmt) {
+                var single_slice = [1]ast.Statement{item.data.stmt};
+                try collectTargetsFromAstStatements(&single_slice, &top_level_written);
+            }
+        }
+
+        var top_it = top_level_written.keyIterator();
+        while (top_it.next()) |k| {
+            const target_name = k.*;
+            const is_reg = (reg_map.get(target_name) != null);
+
+            if (input_ports.contains(target_name)) {
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: Cannot Assign to Input Port '{s}' in module '{s}'
+                    \\======================================================================
+                    \\The signal '{s}' is declared as an input port and cannot be driven internally.
+                    \\
+                    \\Reason:
+                    \\  Input ports are driven externally by the parent module or testbench.
+                    \\  Driving an input port from within the module causes illegal contention.
+                    \\======================================================================
+                    \\
+                    , .{ target_name, mod_name, target_name });
+                return error.CannotAssignInputPort;
+            }
+
+            if (drivers.get(target_name)) |existing| {
+                const target_label = if (is_reg)
+                    try std.fmt.allocPrint(alloc, "{s}.next", .{target_name})
+                else
+                    target_name;
+
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: Multiple Drivers Detected on Signal '{s}' in module '{s}'
+                    \\======================================================================
+                    \\The signal '{s}' is driven by multiple concurrent sources:
+                    \\  1. {s}
+                    \\  2. top-level module statement on '{s}'
+                    \\
+                    \\Reason:
+                    \\  In hardware, concurrent blocks cannot drive the same net without creating contention.
+                    \\======================================================================
+                    \\
+                    , .{ target_label, mod_name, target_label, existing.desc, target_label });
+                return error.MultipleDrivers;
+            } else {
+                const target_label = if (is_reg)
+                    try std.fmt.allocPrint(alloc, "{s}.next", .{target_name})
+                else
+                    target_name;
+                const desc = try std.fmt.allocPrint(alloc, "top-level module statement on '{s}'", .{target_label});
+                try drivers.put(target_name, .{
+                    .kind = .comb_block,
+                    .desc = desc,
+                    .comb_block_idx = 0,
+                });
+            }
+        }
+
+        // 5. Check comb blocks
         var comb_block_count: usize = 0;
         for (items) |item| {
             if (item.tag == .comb_block) {
@@ -4756,6 +4849,256 @@ pub const Elaborator = struct {
             if (c == 0) {
                 try self.dfsCycleCheck(u, &graph, &color, &cycle_path, mod_name, alloc);
             }
+        }
+    }
+
+    fn checkReadBeforeWrite(
+        self: *Elaborator,
+        alloc: std.mem.Allocator,
+        mod_name: []const u8,
+        ports: []const hir.HirPort,
+        local_signals: []const hir.HirSignal,
+        comb_stmts: []const hir.HirStatement,
+        reg_map: *const std.StringHashMap(hir.HirRegister),
+        instances: []const hir.HirSubmoduleInstance,
+        module_ports: *const std.StringHashMap([]hir.HirPort),
+    ) !void {
+        var comb_signals = std.StringHashMap(void).init(alloc);
+        defer comb_signals.deinit();
+
+        // 1. Output ports are combinational signals that must be assigned before read
+        for (ports) |p| {
+            if (p.dir == .out) {
+                try comb_signals.put(p.name, {});
+            }
+        }
+
+        var reg_state_signals = std.StringHashMap(void).init(alloc);
+        defer reg_state_signals.deinit();
+        var reg_it = reg_map.valueIterator();
+        while (reg_it.next()) |r| {
+            try reg_state_signals.put(r.name, {});
+            try reg_state_signals.put(r.q_name, {});
+            try reg_state_signals.put(r.d_name, {});
+        }
+
+        // 2. Local signals that are not registers or internal register nets are combinational wires
+        for (local_signals) |s| {
+            if (reg_map.get(s.name) != null) continue;
+            if (reg_state_signals.contains(s.name)) continue;
+            try comb_signals.put(s.name, {});
+        }
+
+        // 3. Populate initial 'safe to read' (written) signals:
+        var written = std.StringHashMap(void).init(alloc);
+        defer written.deinit();
+
+        // Input and inout ports are always driven externally
+        for (ports) |p| {
+            if (p.dir == .in or p.dir == .inout) {
+                try written.put(p.name, {});
+            }
+        }
+
+        // Registers are always driven by their flop Q outputs (state from previous clock edge)
+        var r_it = reg_map.valueIterator();
+        while (r_it.next()) |r| {
+            try written.put(r.name, {});
+            try written.put(r.q_name, {});
+        }
+
+        // Submodule output connections are driven continuously by the instantiated child module
+        for (instances) |inst| {
+            if (module_ports.get(inst.module_name)) |sub_ports| {
+                for (inst.connections) |conn| {
+                    for (sub_ports) |sp| {
+                        if (std.mem.eql(u8, sp.name, conn.port_name)) {
+                            if (sp.dir == .out) {
+                                if (getHirTargetBaseName(conn.expr)) |target_name| {
+                                    try written.put(target_name, {});
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Constants are safe to read
+        var const_it = self.constants.keyIterator();
+        while (const_it.next()) |k| {
+            try written.put(k.*, {});
+        }
+
+        // 4. Walk procedural statements in order:
+        for (comb_stmts) |stmt| {
+            try self.walkStmtForReadBeforeWrite(alloc, &stmt, &written, &comb_signals, mod_name);
+        }
+    }
+
+    fn walkStmtForReadBeforeWrite(
+        self: *Elaborator,
+        alloc: std.mem.Allocator,
+        stmt: *const hir.HirStatement,
+        written: *std.StringHashMap(void),
+        comb_signals: *const std.StringHashMap(void),
+        mod_name: []const u8,
+    ) !void {
+        switch (stmt.tag) {
+            .assign => {
+                const a = stmt.data.assign;
+                // If target has subscript/index, check index expr
+                if (a.target.tag == .index) {
+                    try self.verifyExprReadSafety(a.target.data.index.index, written, comb_signals, mod_name);
+                }
+                // Verify all signals read in RHS are already written
+                try self.verifyExprReadSafety(a.value, written, comb_signals, mod_name);
+                // Now mark target as written
+                if (getHirTargetBaseName(a.target)) |target_name| {
+                    try written.put(target_name, {});
+                }
+            },
+            .if_stmt => {
+                const ifs = stmt.data.if_stmt;
+                try self.verifyExprReadSafety(ifs.cond, written, comb_signals, mod_name);
+
+                // Clone written set for then branch
+                var then_written = std.StringHashMap(void).init(alloc);
+                defer then_written.deinit();
+                var it = written.keyIterator();
+                while (it.next()) |k| try then_written.put(k.*, {});
+
+                for (ifs.then_body) |s| {
+                    try self.walkStmtForReadBeforeWrite(alloc, &s, &then_written, comb_signals, mod_name);
+                }
+
+                if (ifs.else_body) |eb| {
+                    var else_written = std.StringHashMap(void).init(alloc);
+                    defer else_written.deinit();
+                    var e_it = written.keyIterator();
+                    while (e_it.next()) |k| try else_written.put(k.*, {});
+
+                    for (eb) |s| {
+                        try self.walkStmtForReadBeforeWrite(alloc, &s, &else_written, comb_signals, mod_name);
+                    }
+
+                    // A signal is definitely written after if-else if written in BOTH branches
+                    var t_it = then_written.keyIterator();
+                    while (t_it.next()) |k| {
+                        if (else_written.contains(k.*)) {
+                            try written.put(k.*, {});
+                        }
+                    }
+                }
+            },
+            .case_stmt => {
+                const cs = stmt.data.case_stmt;
+                try self.verifyExprReadSafety(cs.expr, written, comb_signals, mod_name);
+
+                var has_default = false;
+                var branch_written_list = ArrayList(std.StringHashMap(void)).init(alloc);
+                defer {
+                    for (branch_written_list.items) |*bw| bw.deinit();
+                    branch_written_list.deinit();
+                }
+
+                for (cs.branches) |b| {
+                    if (b.is_default) has_default = true;
+                    var b_written = std.StringHashMap(void).init(alloc);
+                    var it = written.keyIterator();
+                    while (it.next()) |k| try b_written.put(k.*, {});
+
+                    for (b.body) |s| {
+                        try self.walkStmtForReadBeforeWrite(alloc, &s, &b_written, comb_signals, mod_name);
+                    }
+                    try branch_written_list.append(b_written);
+                }
+
+                if (has_default and branch_written_list.items.len > 0) {
+                    var candidate_it = branch_written_list.items[0].keyIterator();
+                    while (candidate_it.next()) |k| {
+                        const sig = k.*;
+                        var in_all = true;
+                        for (branch_written_list.items[1..]) |bw| {
+                            if (!bw.contains(sig)) {
+                                in_all = false;
+                                break;
+                            }
+                        }
+                        if (in_all) {
+                            try written.put(sig, {});
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    fn verifyExprReadSafety(
+        self: *Elaborator,
+        expr: *const hir.HirExpr,
+        written: *const std.StringHashMap(void),
+        comb_signals: *const std.StringHashMap(void),
+        mod_name: []const u8,
+    ) anyerror!void {
+        switch (expr.tag) {
+            .signal_ref => {
+                const name = expr.data.signal_ref.name;
+                if (comb_signals.contains(name) and !written.contains(name)) {
+                    std.debug.print(
+                        \\
+                        \\======================================================================
+                        \\COMPILE ERROR: Read-Before-Write Hazard on Signal '{s}' in module '{s}'
+                        \\======================================================================
+                        \\Combinational signal '{s}' is read before it has been assigned.
+                        \\
+                        \\Reason:
+                        \\  Reading a combinational wire before it is assigned in the procedural flow
+                        \\  causes delta-cycle race conditions and simulation-synthesis mismatches.
+                        \\
+                        \\Fix:
+                        \\  Assign '{s}' before reading it, or declare it as a clocked register ('reg').
+                        \\======================================================================
+                        \\
+                        , .{ name, mod_name, name, name });
+                    return error.ReadBeforeWriteHazard;
+                }
+            },
+            .unary => {
+                try self.verifyExprReadSafety(expr.data.unary.operand, written, comb_signals, mod_name);
+            },
+            .binary => {
+                try self.verifyExprReadSafety(expr.data.binary.left, written, comb_signals, mod_name);
+                try self.verifyExprReadSafety(expr.data.binary.right, written, comb_signals, mod_name);
+            },
+            .slice => {
+                try self.verifyExprReadSafety(expr.data.slice.target, written, comb_signals, mod_name);
+            },
+            .index => {
+                try self.verifyExprReadSafety(expr.data.index.target, written, comb_signals, mod_name);
+                try self.verifyExprReadSafety(expr.data.index.index, written, comb_signals, mod_name);
+            },
+            .member => {
+                try self.verifyExprReadSafety(expr.data.member.target, written, comb_signals, mod_name);
+            },
+            .bit_reverse => {
+                try self.verifyExprReadSafety(expr.data.bit_reverse.target, written, comb_signals, mod_name);
+            },
+            .byte_swap => {
+                try self.verifyExprReadSafety(expr.data.byte_swap.target, written, comb_signals, mod_name);
+            },
+            .concat => {
+                for (expr.data.concat.args) |a| {
+                    try self.verifyExprReadSafety(a, written, comb_signals, mod_name);
+                }
+            },
+            .mux => {
+                try self.verifyExprReadSafety(expr.data.mux.cond, written, comb_signals, mod_name);
+                try self.verifyExprReadSafety(expr.data.mux.then_expr, written, comb_signals, mod_name);
+                try self.verifyExprReadSafety(expr.data.mux.else_expr, written, comb_signals, mod_name);
+            },
+            else => {},
         }
     }
 
