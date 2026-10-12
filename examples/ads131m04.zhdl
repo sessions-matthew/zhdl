@@ -4,7 +4,7 @@
 
 pub const Ads131m04Model = module {
     in clk: clock,
-    in rst_n: reset,
+    in rst_n: reset(.low),
 
     // Physical SPI Bus
     in spi_cs_n: u1,
@@ -227,7 +227,7 @@ pub const Ads131m04Model = module {
 
 test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
     wire clk: clock;
-    wire rst_n: reset;
+    wire rst_n: reset(.low);
 
     wire spi_cs_n: u1;
     wire spi_sclk: u1;

@@ -489,7 +489,11 @@ pub const SystemVerilogEmitter = struct {
                 if (w <= 1) {
                     try writer.writeAll("    logic ");
                     try emitIdent(sig.name, writer);
-                    try writer.writeAll(" = 0;\n");
+                    if (sig.hir_type.tag == .reset and sig.hir_type.is_active_low) {
+                        try writer.writeAll(" = 1;\n");
+                    } else {
+                        try writer.writeAll(" = 0;\n");
+                    }
                 } else {
                     try writer.print("    logic [{d}:0] ", .{w - 1});
                     try emitIdent(sig.name, writer);

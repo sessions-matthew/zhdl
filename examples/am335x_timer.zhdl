@@ -4,7 +4,7 @@
 
 pub const Am335xTimer = module {
     in clk: clock,
-    in rst_n: reset,
+    in rst_n: reset(.low),
 
     // Bus Interface (Word-aligned, 32-bit OCP/L4 slave)
     in cs: u1,
@@ -180,7 +180,7 @@ pub const Am335xTimer = module {
 
 test "Am335xTimer OCP bus, compare match IRQ, and soft reset" {
     wire clk: clock;
-    wire rst_n: reset;
+    wire rst_n: reset(.low);
 
     wire cs: u1;
     wire rd_en: u1;

@@ -144,6 +144,7 @@ pub const Elaborator = struct {
                             .type_expr = try self.cloneType(alloc, r.type_expr, substs),
                             .clk = if (r.clk) |c| try self.cloneExpr(alloc, c, substs) else null,
                             .rst = if (r.rst) |rst| try self.cloneExpr(alloc, rst, substs) else null,
+                            .rst_polarity = r.rst_polarity,
                             .init_val = try self.cloneExpr(alloc, r.init_val, substs),
                         },
                     },
@@ -463,6 +464,18 @@ pub const Elaborator = struct {
                             .tag_type = if (t.data.tagged_union.tag_type) |tt| try self.cloneType(alloc, tt, substs) else null,
                             .fields = fields,
                             .methods = t.data.tagged_union.methods,
+                        },
+                    },
+                };
+                return new_t;
+            },
+            .reset => {
+                new_t.* = .{
+                    .tag = .reset,
+                    .loc = t.loc,
+                    .data = .{
+                        .reset = .{
+                            .is_active_low = t.data.reset.is_active_low,
                         },
                     },
                 };
@@ -811,10 +824,13 @@ pub const Elaborator = struct {
             if ((std.mem.eql(u8, cname, "u") or std.mem.eql(u8, cname, "i")) and expr.data.call.args.len == 1) {
                 return true;
             }
+            if (std.mem.eql(u8, cname, "reset") and expr.data.call.args.len <= 1) {
+                return true;
+            }
         }
         if (expr.tag == .identifier) {
             const name = expr.data.identifier;
-            if (std.mem.eql(u8, name, "clock") or std.mem.eql(u8, name, "reset")) return true;
+            if (std.mem.eql(u8, name, "clock") or std.mem.eql(u8, name, "reset") or std.mem.eql(u8, name, "reset_n") or std.mem.eql(u8, name, "reset_low")) return true;
             if (self.types.contains(name)) return true;
             if ((name[0] == 'u' or name[0] == 'i') and name.len > 1) {
                 var all_digits = true;
@@ -851,9 +867,63 @@ pub const Elaborator = struct {
                 };
                 return t;
             }
+            if (std.mem.eql(u8, cname, "reset")) {
+                var is_low = false;
+                if (expr.data.call.args.len > 0) {
+                    const arg0 = expr.data.call.args[0];
+                    if (arg0.tag == .enum_literal) {
+                        const lit = arg0.data.enum_literal;
+                        if (std.mem.eql(u8, lit, "low") or std.mem.eql(u8, lit, "active_low")) {
+                            is_low = true;
+                        }
+                    } else if (arg0.tag == .identifier) {
+                        const id = arg0.data.identifier;
+                        if (std.mem.eql(u8, id, "low") or std.mem.eql(u8, id, "active_low")) {
+                            is_low = true;
+                        }
+                    }
+                }
+                const t = try alloc.create(ast.Type);
+                t.* = .{
+                    .tag = .reset,
+                    .loc = expr.loc,
+                    .data = .{
+                        .reset = .{
+                            .is_active_low = is_low,
+                        },
+                    },
+                };
+                return t;
+            }
         }
         if (expr.tag == .identifier) {
             const name = expr.data.identifier;
+            if (std.mem.eql(u8, name, "reset")) {
+                const t = try alloc.create(ast.Type);
+                t.* = .{
+                    .tag = .reset,
+                    .loc = expr.loc,
+                    .data = .{
+                        .reset = .{
+                            .is_active_low = false,
+                        },
+                    },
+                };
+                return t;
+            }
+            if (std.mem.eql(u8, name, "reset_n") or std.mem.eql(u8, name, "reset_low")) {
+                const t = try alloc.create(ast.Type);
+                t.* = .{
+                    .tag = .reset,
+                    .loc = expr.loc,
+                    .data = .{
+                        .reset = .{
+                            .is_active_low = true,
+                        },
+                    },
+                };
+                return t;
+            }
             if ((name[0] == 'u' or name[0] == 'i') and name.len > 1) {
                 var all_digits = true;
                 for (name[1..]) |ch| {
@@ -1148,22 +1218,37 @@ pub const Elaborator = struct {
 
         var default_clk_name: ?[]const u8 = null;
         var default_rst_name: ?[]const u8 = null;
+        var default_rst_active_low = false;
         var local_consts = std.StringHashMap(u64).init(alloc);
 
         for (items) |item| {
             if (item.tag == .port) {
                 const p = item.data.port;
-                if (std.mem.eql(u8, p.name, "clk") or std.mem.eql(u8, p.name, "clock") or
-                    (p.type_expr.tag == .named and std.mem.eql(u8, p.type_expr.data.named, "clock")))
-                {
-                    if (default_clk_name == null) default_clk_name = p.name;
+                const h_type = self.lowerType(p.type_expr) catch null;
+                if (h_type) |ht| {
+                    if (ht.tag == .clock or std.mem.eql(u8, p.name, "clk") or std.mem.eql(u8, p.name, "clock")) {
+                        if (default_clk_name == null) default_clk_name = p.name;
+                    }
+                    if (ht.tag == .reset) {
+                        if (default_rst_name == null) {
+                            default_rst_name = p.name;
+                            default_rst_active_low = ht.is_active_low;
+                        }
+                    } else if (std.mem.eql(u8, p.name, "rst") or std.mem.eql(u8, p.name, "reset")) {
+                        if (default_rst_name == null) {
+                            default_rst_name = p.name;
+                            default_rst_active_low = false;
+                        }
+                    }
+                    try signal_types.put(p.name, ht);
                 }
-                if (std.mem.eql(u8, p.name, "rst") or std.mem.eql(u8, p.name, "rst_n") or
-                    std.mem.eql(u8, p.name, "reset") or std.mem.eql(u8, p.name, "nrst") or
-                    std.mem.eql(u8, p.name, "aresetn") or
-                    (p.type_expr.tag == .named and std.mem.eql(u8, p.type_expr.data.named, "reset")))
-                {
-                    if (default_rst_name == null) default_rst_name = p.name;
+            } else if (item.tag == .const_decl) {
+                const c = item.data.const_decl;
+                if (c.type_annot) |ta| {
+                    const h_type = self.lowerType(ta) catch null;
+                    if (h_type) |ht| {
+                        try signal_types.put(c.name, ht);
+                    }
                 }
             }
         }
@@ -1207,9 +1292,13 @@ pub const Elaborator = struct {
                     } else default_rst_name;
 
                     var rst_active_low = false;
-                    if (rst_str) |s| {
-                        if (std.mem.endsWith(u8, s, "_n") or std.mem.endsWith(u8, s, "_b") or std.mem.eql(u8, s, "nrst") or std.mem.eql(u8, s, "aresetn")) {
-                            rst_active_low = true;
+                    if (r.rst_polarity) |pol| {
+                        rst_active_low = pol;
+                    } else if (rst_str) |s| {
+                        if (signal_types.get(s)) |st| {
+                            rst_active_low = st.is_active_low;
+                        } else if (std.mem.eql(u8, s, default_rst_name orelse "")) {
+                            rst_active_low = default_rst_active_low;
                         }
                     }
                     var init_val: u64 = if (r.init_val.tag == .number) r.init_val.data.number.val else 0;
@@ -1407,6 +1496,12 @@ pub const Elaborator = struct {
                                     const h_type: hir.HirType = .{ .tag = .bits, .width = 32 };
                                     const q_name = try std.fmt.allocPrint(alloc, "{s}_q", .{var_name});
                                     const d_name = try std.fmt.allocPrint(alloc, "{s}_d", .{var_name});
+                                    var rst_active_low = false;
+                                    if (rst_str) |s| {
+                                        if (signal_types.get(s)) |st| {
+                                            rst_active_low = st.is_active_low;
+                                        }
+                                    }
                                     const hir_reg: hir.HirRegister = .{
                                         .name = var_name,
                                         .q_name = q_name,
@@ -1414,6 +1509,7 @@ pub const Elaborator = struct {
                                         .hir_type = h_type,
                                         .clk_name = clk_str,
                                         .rst_name = rst_str,
+                                        .rst_active_low = rst_active_low,
                                         .init_val = 0,
                                     };
                                     try registers.append(hir_reg);
@@ -1638,8 +1734,18 @@ pub const Elaborator = struct {
                                 else
                                     1;
                                 var active_low = false;
-                                if (std.mem.endsWith(u8, obj_name, "_n") or std.mem.endsWith(u8, obj_name, "_b") or std.mem.eql(u8, obj_name, "nrst") or std.mem.eql(u8, obj_name, "aresetn")) {
-                                    active_low = true;
+                                if (signal_types.get(obj_name)) |st| {
+                                    active_low = st.is_active_low;
+                                }
+                                if (c.args.len > 1) {
+                                    if (c.args[1].tag == .enum_literal) {
+                                        const lit = c.args[1].data.enum_literal;
+                                        if (std.mem.eql(u8, lit, "low") or std.mem.eql(u8, lit, "active_low")) {
+                                            active_low = true;
+                                        } else if (std.mem.eql(u8, lit, "high") or std.mem.eql(u8, lit, "active_high")) {
+                                            active_low = false;
+                                        }
+                                    }
                                 }
                                 try sim_stmts.append(.{
                                     .tag = .rst_pulse,
@@ -3361,12 +3467,22 @@ pub const Elaborator = struct {
                     return .{ .tag = .clock, .width = 1 };
                 }
                 if (std.mem.eql(u8, name, "reset")) {
-                    return .{ .tag = .reset, .width = 1 };
+                    return .{ .tag = .reset, .width = 1, .is_active_low = false };
+                }
+                if (std.mem.eql(u8, name, "reset_n") or std.mem.eql(u8, name, "reset_low")) {
+                    return .{ .tag = .reset, .width = 1, .is_active_low = true };
                 }
                 if (self.types.get(name)) |found| {
                     return found;
                 }
                 return .{ .tag = .bits, .width = 1, .name = name };
+            },
+            .reset => {
+                return .{
+                    .tag = .reset,
+                    .width = 1,
+                    .is_active_low = t.data.reset.is_active_low,
+                };
             },
             .enum_type => {
                 const tag_w: u32 = if (t.data.enum_type.tag_type != null)

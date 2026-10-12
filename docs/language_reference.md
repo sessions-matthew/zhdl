@@ -139,14 +139,40 @@ wire offset: i16 = -128;
 ### 3.2 Hardware Domain Types (`clock`, `reset`)
 
 Ports that represent clock and reset signals use explicit domain types:
-- `clock`: Identifies an edge-triggered clock signal.
-- `reset`: Identifies an asynchronous or synchronous reset signal.
+- `clock`: Identifies an edge-triggered clock signal (default `posedge`).
+- `reset`: Identifies an asynchronous or synchronous reset signal (default active-high).
+- `reset(.low)` / `reset(.high)`: Explicitly specifies reset polarity through the type system.
+- `reset_n` / `reset_low`: Convenient type aliases for active-low reset (`reset(.low)`).
 
-#### Active-Low Reset Detection
-The compiler analyzes reset signal names. If a reset signal ends in `_n`, `_b`, or is named `nrst` or `aresetn`, the SystemVerilog codegen automatically configures the sequential block sensitivity for active-low operation:
+#### Explicit Reset Polarity (No Name Heuristics)
+ZHdl does not deduce reset polarity from variable names. Instead, reset polarity is strictly declared through the signal's type or explicit register configuration:
+
+```zig
+// Active-high reset (default)
+in rst: reset,
+
+// Explicit active-low reset
+in rst_n: reset(.low),
+
+// Explicit active-high reset (even if named with _n)
+in rst_n: reset(.high),
+```
+
+The SystemVerilog codegen automatically emits the correct sensitivity list and condition based on the signal's type:
 ```systemverilog
+// reset(.low)
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) ...
+
+// reset(.high) or reset
+always_ff @(posedge clk or posedge rst) begin
+    if (rst) ...
+```
+
+Registers can also explicitly override or specify polarity:
+```zig
+reg(clk, rst, .low) count: u8 = 0;
+var state = reg(u8, .{ .clk = clk, .rst = rst, .active_low = true, .init = 0 });
 ```
 
 ### 3.3 Unpacked Arrays (`[N]T`)

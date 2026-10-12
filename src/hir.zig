@@ -41,6 +41,7 @@ pub const HirType = struct {
     tag: HirTypeTag,
     width: u32, // total bit width
     is_signed: bool = false,
+    is_active_low: bool = false,
     name: []const u8 = "",
     enum_variants: []HirEnumVariant = &.{},
     struct_fields: []HirStructField = &.{},

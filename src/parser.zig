@@ -284,6 +284,7 @@ pub const Parser = struct {
 
                         var clk_expr: ?*ast.Expr = null;
                         var rst_expr: ?*ast.Expr = null;
+                        var rst_polarity: ?bool = null;
                         var init_expr: ?*ast.Expr = null;
 
                         while (!self.check(.r_brace) and !self.check(.eof)) {
@@ -298,6 +299,19 @@ pub const Parser = struct {
                                 rst_expr = val;
                             } else if (std.mem.eql(u8, field_name.slice, "init")) {
                                 init_expr = val;
+                            } else if (std.mem.eql(u8, field_name.slice, "active_low") or std.mem.eql(u8, field_name.slice, "is_active_low")) {
+                                if (val.tag == .boolean) {
+                                    rst_polarity = val.data.boolean;
+                                }
+                            } else if (std.mem.eql(u8, field_name.slice, "polarity")) {
+                                if (val.tag == .enum_literal) {
+                                    const lit = val.data.enum_literal;
+                                    if (std.mem.eql(u8, lit, "low") or std.mem.eql(u8, lit, "active_low")) {
+                                        rst_polarity = true;
+                                    } else if (std.mem.eql(u8, lit, "high") or std.mem.eql(u8, lit, "active_high")) {
+                                        rst_polarity = false;
+                                    }
+                                }
                             }
 
                             if (!self.match(.comma)) break;
@@ -319,6 +333,7 @@ pub const Parser = struct {
                                     .type_expr = reg_type,
                                     .clk = clk_expr.?,
                                     .rst = rst,
+                                    .rst_polarity = rst_polarity,
                                     .init_val = init_val,
                                 },
                             },
@@ -344,41 +359,54 @@ pub const Parser = struct {
                     return error.UnexpectedToken;
                 }
             } else if (self.match(.kw_reg)) {
-            // Option 1 syntax: reg count: u8 = 0; OR reg(clk, rst) count: u8 = 0;
-            var clk_expr: ?*ast.Expr = null;
-            var rst_expr: ?*ast.Expr = null;
+                // Option 1 syntax: reg count: u8 = 0; OR reg(clk, rst) count: u8 = 0; OR reg(clk, rst, .low) count: u8 = 0;
+                var clk_expr: ?*ast.Expr = null;
+                var rst_expr: ?*ast.Expr = null;
+                var rst_polarity: ?bool = null;
 
-            if (self.match(.l_paren)) {
-                clk_expr = try self.parseExpr(alloc);
-                if (self.match(.comma)) {
-                    rst_expr = try self.parseExpr(alloc);
+                if (self.match(.l_paren)) {
+                    clk_expr = try self.parseExpr(alloc);
+                    if (self.match(.comma)) {
+                        rst_expr = try self.parseExpr(alloc);
+                        if (self.match(.comma)) {
+                            const pol_expr = try self.parseExpr(alloc);
+                            if (pol_expr.tag == .enum_literal) {
+                                const lit = pol_expr.data.enum_literal;
+                                if (std.mem.eql(u8, lit, "low") or std.mem.eql(u8, lit, "active_low")) {
+                                    rst_polarity = true;
+                                } else if (std.mem.eql(u8, lit, "high") or std.mem.eql(u8, lit, "active_high")) {
+                                    rst_polarity = false;
+                                }
+                            }
+                        }
+                    }
+                    _ = try self.expect(.r_paren);
                 }
-                _ = try self.expect(.r_paren);
-            }
 
-            const reg_name = try self.expect(.identifier);
-            _ = try self.expect(.colon);
-            const reg_type = try self.parseType(alloc);
+                const reg_name = try self.expect(.identifier);
+                _ = try self.expect(.colon);
+                const reg_type = try self.parseType(alloc);
 
-            var init_val: *ast.Expr = try self.createZeroLit(alloc, item_loc);
-            if (self.match(.equal)) {
-                init_val = try self.parseExpr(alloc);
-            }
-            _ = try self.expect(.semicolon);
+                var init_val: *ast.Expr = try self.createZeroLit(alloc, item_loc);
+                if (self.match(.equal)) {
+                    init_val = try self.parseExpr(alloc);
+                }
+                _ = try self.expect(.semicolon);
 
-            try items.append(.{
-                .tag = .reg_decl,
-                .loc = item_loc,
-                .data = .{
-                    .reg_decl = .{
-                        .name = reg_name.slice,
-                        .type_expr = reg_type,
-                        .clk = clk_expr,
-                        .rst = rst_expr,
-                        .init_val = init_val,
+                try items.append(.{
+                    .tag = .reg_decl,
+                    .loc = item_loc,
+                    .data = .{
+                        .reg_decl = .{
+                            .name = reg_name.slice,
+                            .type_expr = reg_type,
+                            .clk = clk_expr,
+                            .rst = rst_expr,
+                            .rst_polarity = rst_polarity,
+                            .init_val = init_val,
+                        },
                     },
-                },
-            });
+                });
         } else if (self.match(.kw_const)) {
                 // const rx = uart.Rx(...).instantiate(.{ ... }); OR const W = 8;
                 const const_name = try self.expect(.identifier);
@@ -966,7 +994,62 @@ pub const Parser = struct {
                 return t;
             }
 
-            // Named type like clock, reset, or custom type
+            // Check for reset or reset(...)
+            if (std.mem.eql(u8, name, "reset")) {
+                var is_active_low = false;
+                if (self.match(.l_paren)) {
+                    if (self.match(.dot)) {
+                        const pol_tok = try self.expect(.identifier);
+                        if (std.mem.eql(u8, pol_tok.slice, "low") or std.mem.eql(u8, pol_tok.slice, "active_low")) {
+                            is_active_low = true;
+                        } else if (std.mem.eql(u8, pol_tok.slice, "high") or std.mem.eql(u8, pol_tok.slice, "active_high")) {
+                            is_active_low = false;
+                        } else {
+                            return error.UnexpectedToken;
+                        }
+                    } else if (self.check(.identifier)) {
+                        const pol_tok = self.current;
+                        self.advance();
+                        if (std.mem.eql(u8, pol_tok.slice, "low") or std.mem.eql(u8, pol_tok.slice, "active_low")) {
+                            is_active_low = true;
+                        } else if (std.mem.eql(u8, pol_tok.slice, "high") or std.mem.eql(u8, pol_tok.slice, "active_high")) {
+                            is_active_low = false;
+                        } else {
+                            return error.UnexpectedToken;
+                        }
+                    } else {
+                        return error.UnexpectedToken;
+                    }
+                    _ = try self.expect(.r_paren);
+                }
+                const t = try alloc.create(ast.Type);
+                t.* = .{
+                    .tag = .reset,
+                    .loc = type_loc,
+                    .data = .{
+                        .reset = .{
+                            .is_active_low = is_active_low,
+                        },
+                    },
+                };
+                return t;
+            }
+
+            if (std.mem.eql(u8, name, "reset_n") or std.mem.eql(u8, name, "reset_low")) {
+                const t = try alloc.create(ast.Type);
+                t.* = .{
+                    .tag = .reset,
+                    .loc = type_loc,
+                    .data = .{
+                        .reset = .{
+                            .is_active_low = true,
+                        },
+                    },
+                };
+                return t;
+            }
+
+            // Named type like clock, or custom type
             const t = try alloc.create(ast.Type);
             t.* = .{
                 .tag = .named,

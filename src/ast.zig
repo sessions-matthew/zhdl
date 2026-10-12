@@ -17,6 +17,7 @@ pub const TypeTag = enum {
     array,
     optional,
     tagged_union,
+    reset,
 };
 
 pub const EnumField = struct {
@@ -63,6 +64,9 @@ pub const Type = struct {
             tag_type: ?*Type,
             fields: []UnionField,
             methods: []FnDecl = &.{},
+        },
+        reset: struct {
+            is_active_low: bool,
         },
     },
 };
@@ -248,6 +252,7 @@ pub const ModuleItem = struct {
             type_expr: *Type,
             clk: ?*Expr,
             rst: ?*Expr,
+            rst_polarity: ?bool = null,
             init_val: *Expr,
         },
         instance: struct {

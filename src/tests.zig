@@ -139,7 +139,7 @@ test "option 1 reg syntax with implicit clock/reset binding" {
     const src =
         \\pub const StreamReg = module {
         \\    in clk: clock,
-        \\    in rst_n: reset,
+        \\    in rst_n: reset(.low),
         \\    in d_in: u8,
         \\    out d_out: u8,
         \\
@@ -1908,6 +1908,93 @@ test "time-based testing: clk.generate and wait_for with time literal timeout" {
     try runVerilatorLint(std.testing.allocator, sv_code);
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
+
+test "typed reset polarity: explicit polarity without variable name deduction" {
+    const src =
+        \\pub const TypedResetModule = module {
+        \\    in clk: clock,
+        \\    // Variable named rst_n but typed active-high: MUST emit posedge rst_n and if (rst_n)!
+        \\    in rst_n: reset(.high),
+        \\    // Variable without _n but typed active-low: MUST emit negedge rst_custom and if (!rst_custom)!
+        \\    in rst_custom: reset(.low),
+        \\    in d: u8,
+        \\    out q1: u8,
+        \\    out q2: u8,
+        \\
+        \\    reg(clk, rst_n) r1: u8 = 0;
+        \\    reg(clk, rst_custom) r2: u8 = 0;
+        \\
+        \\    comb {
+        \\        r1.next = d;
+        \\        r2.next = d;
+        \\        q1 = r1;
+        \\        q2 = r2;
+        \\    }
+        \\};
+        \\
+        \\test "TypedResetTb" {
+        \\    wire clk: clock;
+        \\    wire rst_n: reset(.high);
+        \\    wire rst_custom: reset(.low);
+        \\    wire d: u8;
+        \\    wire q1: u8;
+        \\    wire q2: u8;
+        \\
+        \\    const dut = TypedResetModule.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst_n = rst_n,
+        \\        .rst_custom = rst_custom,
+        \\        .d = d,
+        \\        .q1 = q1,
+        \\        .q2 = q2,
+        \\    });
+        \\
+        \\    sim {
+        \\        clk.generate(10);
+        \\        rst_n.pulse(2);
+        \\        rst_custom.pulse(2);
+        \\        step(clk, 4);
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+
+    // Verify rst_n (typed .high) emits posedge rst_n and if (rst_n)
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always_ff @(posedge clk or posedge rst_n) begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "if (rst_n) begin") != null);
+
+    // Verify rst_custom (typed .low) emits negedge rst_custom and if (!rst_custom)
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always_ff @(posedge clk or negedge rst_custom) begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "if (!rst_custom) begin") != null);
+
+    // Verify testbench pulse emission:
+    // rst_n (.high): 1 then 0
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "rst_n = 1'b1;\n        repeat (2) @(posedge clk);\n        rst_n = 1'b0;") != null);
+    // rst_custom (.low): 0 then 1
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "rst_custom = 1'b0;\n        repeat (2) @(posedge clk);\n        rst_custom = 1'b1;") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
 
 
 

@@ -23,7 +23,7 @@ pub const Crc16Ccitt = module {
 
 pub const UartBridge = module {
     in clk: clock,
-    in rst_n: reset,
+    in rst_n: reset(.low),
 
     // Interface with STM32 LPUART1
     in tx_byte_valid: u1,
@@ -173,7 +173,7 @@ pub const UartBridge = module {
 
 test "UartBridge framing, CRC16 verification, and host injection FIFO" {
     wire clk: clock;
-    wire rst_n: reset;
+    wire rst_n: reset(.low);
 
     wire tx_byte_valid: u1;
     wire tx_byte: u8;
