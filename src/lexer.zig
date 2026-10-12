@@ -109,6 +109,8 @@ pub const Lexer = struct {
                 return .{ .tag = .bang, .loc = start_loc, .slice = "!" };
             },
 
+            '?' => return .{ .tag = .question_mark, .loc = start_loc, .slice = "?" },
+
             '+' => {
                 if (self.match('%')) {
                     return .{ .tag = .plus_percent, .loc = start_loc, .slice = "+%" };
@@ -198,6 +200,29 @@ pub const Lexer = struct {
 
         while (self.index < self.source.len and (std.ascii.isDigit(self.peek()) or self.peek() == '_')) {
             self.advance();
+        }
+
+        if (self.index < self.source.len and self.peek() == '\'') {
+            self.advance(); // consume '\''
+            if (self.index < self.source.len) {
+                const base_ch = self.peek();
+                if (base_ch == 'h' or base_ch == 'H') {
+                    self.advance();
+                    while (self.index < self.source.len and (std.ascii.isHex(self.peek()) or self.peek() == '_')) {
+                        self.advance();
+                    }
+                } else if (base_ch == 'b' or base_ch == 'B') {
+                    self.advance();
+                    while (self.index < self.source.len and (self.peek() == '0' or self.peek() == '1' or self.peek() == '_')) {
+                        self.advance();
+                    }
+                } else if (base_ch == 'd' or base_ch == 'D') {
+                    self.advance();
+                    while (self.index < self.source.len and (std.ascii.isDigit(self.peek()) or self.peek() == '_')) {
+                        self.advance();
+                    }
+                }
+            }
         }
 
         return .{

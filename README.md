@@ -109,6 +109,13 @@ zig build -Doptimize=ReleaseFast
 - **`@sync2ff(dest_clk, sig)`**: 2-stage synchronizer with `(* ASYNC_REG = "TRUE" *)` synthesis attribute.
 - **Downward Slicing (`x[4..0]`)**: Reverse-order bit extraction with zero logic gates.
 
+### Zig-Inspired Type System
+- **`packed struct`**: Bit-exact hardware layouts, struct literals `.{ ... }`, and member slicing (`s.field`).
+- **`?T` (Hardware Optionals)**: Valid + Data channels with `null` literal, auto-wrapping, and `if (opt) |data|` payload capture.
+- **`union(enum)`**: Hardware tagged unions with discriminant tag + payload multiplexing and `switch` pattern matching with capture.
+- **Type Methods (`pub fn`)**: Pure combinational inlined helper functions attached to structs and unions.
+- **Comptime Generics (`fn(comptime ...) type`)**: Parameterized module templates monomorphized into specialized synthesizable modules.
+
 ---
 
 ## License

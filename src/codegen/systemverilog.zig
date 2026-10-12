@@ -21,6 +21,35 @@ pub const StringWriter = struct {
     }
 };
 
+fn isSvKeyword(name: []const u8) bool {
+    const sv_keywords = std.StaticStringMap(void).initComptime(.{
+        .{"byte"},
+        .{"shortint"},
+        .{"int"},
+        .{"longint"},
+        .{"integer"},
+        .{"time"},
+        .{"bit"},
+        .{"logic"},
+        .{"reg"},
+        .{"input"},
+        .{"output"},
+        .{"inout"},
+        .{"wire"},
+        .{"type"},
+        .{"process"},
+    });
+    return sv_keywords.has(name);
+}
+
+fn emitIdent(name: []const u8, writer: anytype) !void {
+    if (isSvKeyword(name)) {
+        try writer.print("\\{s} ", .{name});
+    } else {
+        try writer.writeAll(name);
+    }
+}
+
 pub const SystemVerilogEmitter = struct {
     allocator: std.mem.Allocator,
 
@@ -41,6 +70,9 @@ pub const SystemVerilogEmitter = struct {
             \\`timescale 1ns / 1ps
             \\`default_nettype none
             \\/* verilator lint_off DECLFILENAME */
+            \\/* verilator lint_off LATCH */
+            \\/* verilator lint_off UNUSEDSIGNAL */
+            \\/* verilator lint_off CASEINCOMPLETE */
             \\
             \\
         );
@@ -133,17 +165,19 @@ pub const SystemVerilogEmitter = struct {
             if (is_port) continue;
 
             if (sig.hir_type.tag == .array) {
-                try writer.print("    logic [{d}:0] {s} [0:{d}];\n", .{
-                    sig.hir_type.elem_width - 1,
-                    sig.name,
-                    sig.hir_type.array_len - 1,
-                });
+                try writer.print("    logic [{d}:0] ", .{sig.hir_type.elem_width - 1});
+                try emitIdent(sig.name, writer);
+                try writer.print(" [0:{d}];\n", .{sig.hir_type.array_len - 1});
             } else {
                 const w = if (sig.hir_type.width > 0) sig.hir_type.width else 1;
                 if (w <= 1) {
-                    try writer.print("    logic {s};\n", .{sig.name});
+                    try writer.writeAll("    logic ");
+                    try emitIdent(sig.name, writer);
+                    try writer.writeAll(";\n");
                 } else {
-                    try writer.print("    logic [{d}:0] {s};\n", .{ w - 1, sig.name });
+                    try writer.print("    logic [{d}:0] ", .{w - 1});
+                    try emitIdent(sig.name, writer);
+                    try writer.writeAll(";\n");
                 }
             }
             try emitted_signals.put(sig.name, {});
@@ -279,14 +313,23 @@ pub const SystemVerilogEmitter = struct {
             .lit => {
                 const w = if (expr.hir_type.width > 0) expr.hir_type.width else 32;
                 const raw = expr.data.lit.raw;
-                if (raw.len > 2 and (raw[1] == 'x' or raw[1] == 'X')) {
+                const is_hex = (raw.len > 2 and (raw[1] == 'x' or raw[1] == 'X')) or
+                    std.mem.indexOf(u8, raw, "'h") != null or
+                    std.mem.indexOf(u8, raw, "'H") != null;
+                const is_bin = (raw.len > 2 and (raw[1] == 'b' or raw[1] == 'B')) or
+                    std.mem.indexOf(u8, raw, "'b") != null or
+                    std.mem.indexOf(u8, raw, "'B") != null;
+
+                if (is_hex) {
                     try writer.print("{d}'h{x}", .{ w, expr.data.lit.val });
+                } else if (is_bin) {
+                    try writer.print("{d}'b{b}", .{ w, expr.data.lit.val });
                 } else {
                     try writer.print("{d}'d{d}", .{ w, expr.data.lit.val });
                 }
             },
             .signal_ref => {
-                try writer.writeAll(expr.data.signal_ref.name);
+                try emitIdent(expr.data.signal_ref.name, writer);
             },
             .member => {
                 try self.emitExpr(expr.data.member.target, writer);
@@ -314,7 +357,11 @@ pub const SystemVerilogEmitter = struct {
                         const hi = if (s.end > 0) s.end - 1 else 0;
                         const lo = s.start;
                         try self.emitExpr(s.target, writer);
-                        try writer.print("[{d}:{d}]", .{ hi, lo });
+                        if (hi == lo) {
+                            try writer.print("[{d}]", .{lo});
+                        } else {
+                            try writer.print("[{d}:{d}]", .{ hi, lo });
+                        }
                     }
                 }
             },
@@ -428,22 +475,25 @@ pub const SystemVerilogEmitter = struct {
 
         try writer.writeAll("/* verilator lint_off PROCASSINIT */\n");
         try writer.writeAll("/* verilator lint_off UNUSEDSIGNAL */\n");
+        try writer.writeAll("/* verilator lint_off CASEINCOMPLETE */\n");
         try writer.print("module {s};\n\n", .{tb_mod_name});
 
         // 1. Emit signals
         for (tb.signals) |sig| {
             if (sig.hir_type.tag == .array) {
-                try writer.print("    logic [{d}:0] {s} [0:{d}];\n", .{
-                    sig.hir_type.elem_width - 1,
-                    sig.name,
-                    sig.hir_type.array_len - 1,
-                });
+                try writer.print("    logic [{d}:0] ", .{sig.hir_type.elem_width - 1});
+                try emitIdent(sig.name, writer);
+                try writer.print(" [0:{d}];\n", .{sig.hir_type.array_len - 1});
             } else {
                 const w = if (sig.hir_type.width > 0) sig.hir_type.width else 1;
                 if (w <= 1) {
-                    try writer.print("    logic {s} = 0;\n", .{sig.name});
+                    try writer.writeAll("    logic ");
+                    try emitIdent(sig.name, writer);
+                    try writer.writeAll(" = 0;\n");
                 } else {
-                    try writer.print("    logic [{d}:0] {s} = '0;\n", .{ w - 1, sig.name });
+                    try writer.print("    logic [{d}:0] ", .{w - 1});
+                    try emitIdent(sig.name, writer);
+                    try writer.writeAll(" = '0;\n");
                 }
             }
         }

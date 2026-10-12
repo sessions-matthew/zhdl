@@ -18,7 +18,11 @@ This document serves as the formal language specification and reference guide fo
    - [Bit-Vectors (`uN`, `iN`)](#31-bit-vectors-un-in)
    - [Hardware Domain Types (`clock`, `reset`)](#32-hardware-domain-types-clock-reset)
    - [Unpacked Arrays (`[N]T`)](#33-unpacked-arrays-nt)
-   - [Structs and Enums](#34-structs-and-enums)
+   - [Packed Structs (`packed struct`)](#34-packed-structs-packed-struct)
+   - [Hardware Optionals (`?T`)](#35-hardware-optionals-t)
+   - [Hardware Tagged Unions (`union(enum)`)](#36-hardware-tagged-unions-unionenum)
+   - [Type Methods & Pure Combinational Functions (`pub fn`)](#37-type-methods--pure-combinational-functions-pub-fn)
+   - [Comptime Generics (`fn(comptime ...) type`)](#38-comptime-generics-fncomptime--type)
 4. [Module Architecture & Declarations](#4-module-architecture--declarations)
    - [Module Definition](#41-module-definition)
    - [Port Declarations (`in`, `out`, `inout`)](#42-port-declarations-in-out-inout)
@@ -156,22 +160,133 @@ wire fifo_mem: [64]u8;
 var reg_bank = reg([16]u32, .{ .clk = clk, .rst = rst, .init = 0 });
 ```
 
-### 3.4 Structs and Enums
+### 3.4 Packed Structs (`packed struct`)
+
+ZHdl supports bit-exact hardware packed structs. Struct fields are laid out contiguously without padding:
 
 ```zig
-pub const State = enum(u2) {
-    idle = 0,
-    read = 1,
-    write = 2,
-    done = 3,
-};
-
 pub const PacketHeader = packed struct {
     sof: u8,
     msg_id: u8,
     length: u16,
 };
 ```
+
+- **Bit Layout**: Fields are ordered from MSB to LSB. The total bit width is the exact sum of member field widths ($8 + 8 + 16 = 32\text{ bits}$).
+- **Struct Literals**: Supports anonymous struct literals `.{ .sof = 0xA5, .msg_id = 1, .length = 64 }` and named struct literals `PacketHeader{ ... }`.
+- **Member Access & Slicing**: Reading `hdr.msg_id` automatically lowers to the exact bit-slice (`hdr[23:16]`).
+- **Field Assignment**: Assigning to `hdr.msg_id = 8'h02;` on a wire or `hdr.msg_id := 8'h02;` on a register updates the corresponding bit slice.
+
+### 3.5 Hardware Optionals (`?T`)
+
+Optional types represent hardware **Valid + Data** handshakes:
+
+```zig
+reg rx_byte: ?u8 = null;
+```
+
+- **Physical Layout**: Width is $1 + W(T)$. Bit $W(T)$ (MSB) is the 1-bit `valid` flag, and bits $[W(T)-1 : 0]$ are the payload data.
+- **Null Literal (`null`)**: `rx_byte := null;` clears the valid bit and zero-clears the data bits.
+- **Auto-Wrapping**: Assigning a raw payload value `rx_byte := 8'h42;` automatically asserts valid and packs the data: `{ 1'b1, 8'h42 }`.
+- **Direct Inspection**: Inspect `rx_byte.valid` (1 bit) and `rx_byte.data` ($W(T)$ bits).
+- **Pattern Unwrapping (`if (opt) |data|`)**:
+  ```zig
+  if (rx_byte) |b| {
+      out_byte = b;
+  }
+  ```
+  Evaluates the valid bit and provides the unwrapped payload `b` in the body.
+
+### 3.6 Hardware Tagged Unions (`union(enum)`)
+
+Hardware tagged unions represent variant multiplexing where multiple data types share a common bitfield accompanied by a discriminant tag:
+
+```zig
+pub const Packet = union(enum) {
+    ping: u8,
+    data: u32,
+    ack: void,
+};
+```
+
+- **Physical Layout**: Total width is $W_{\text{tag}} + \max_i(W_i)$.
+  - Tag discriminant width $W_{\text{tag}} = \lceil \log_2(N) \rceil$ (or explicit enum backing type).
+  - Discriminant tag stored at MSB $[W_{\text{total}}-1 : W_{\text{payload}}]$.
+  - Variant payload stored at LSB $[W_{\text{payload}}-1 : 0]$.
+- **Initialization**: `Packet{ .ping = 8'hA5 }` or `.{ .ping = 8'hA5 }` sets tag 0 and zero-extends the payload.
+- **Member Access**: `pkt.tag` inspects the discriminant; `pkt.ping` slices the payload.
+- **Pattern Matching with Capture**:
+  ```zig
+  switch (pkt) {
+      .ping => |p| {
+          out_val = p;
+      },
+      .data => |d| {
+          out_val = d[7:0];
+      },
+      .ack => {
+          out_val = 0;
+      },
+  }
+  ```
+  Synthesizes a clean SystemVerilog `case (pkt[33:32])` with automatic capture binding.
+
+### 3.7 Type Methods & Pure Combinational Functions (`pub fn`)
+
+Types can encapsulate pure combinational helper functions and methods:
+
+```zig
+pub const Float16 = packed struct {
+    sign: u1,
+    exp: u5,
+    mantissa: u10,
+
+    pub fn isZero(self: Float16) u1 {
+        return self.exp == 0 and self.mantissa == 0;
+    }
+
+    pub fn isNegative(self: Float16) u1 {
+        return self.sign == 1;
+    }
+};
+```
+
+- **Method Call Syntax**: `f.isZero()` resolves to the method on `Float16` with `self` bound to `f`.
+- **Associated Functions**: `Float16.isZero(f)` or static helpers.
+- **Combinational Inlining**: Evaluated and inlined as combinational logic with zero simulation or runtime overhead.
+- **Top-Level Helper Functions**: `pub fn clamp_add(a: u8, b: u8) u8 { return if (a > 200) 200 else a + b; }` can be called directly in `comb` blocks.
+
+### 3.8 Comptime Generics (`fn(comptime ...) type`)
+
+ZHdl supports parameterizing hardware modules via compile-time functions returning `module { ... }`:
+
+```zig
+pub fn Counter(comptime W: usize) type {
+    return module {
+        in clk: clock,
+        in rst: reset,
+        in en: u1,
+        out count: u(W),
+
+        reg val: u(W) = 0;
+
+        comb {
+            val.next = if (en) val + 1 else val;
+            count = val;
+        }
+    };
+}
+```
+
+- **Monomorphization**: When instantiated as `Counter(8)` and `Counter(16)`, the compiler specializes independent, collision-free SystemVerilog modules `Counter_8` and `Counter_16`.
+- **Parameter Kinds**: Supports numeric parameters (`comptime W: usize`) and hardware type parameters (`comptime T: type`).
+- **Instantiation**:
+  ```zig
+  // Alias or direct instantiation
+  const Counter8 = Counter(8);
+  const c1 = Counter8.instantiate(.{ .clk = clk, .rst = rst, .en = en, .count = count8 });
+  const c2 = Counter(16).instantiate(.{ .clk = clk, .rst = rst, .en = en, .count = count16 });
+  ```
 
 ---
 

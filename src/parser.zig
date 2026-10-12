@@ -199,6 +199,7 @@ pub const Parser = struct {
             _ = try self.expect(.semicolon);
         } else {
             body_expr = try self.parseExpr(alloc);
+            _ = self.match(.semicolon);
         }
         _ = try self.expect(.r_brace);
 
@@ -209,9 +210,11 @@ pub const Parser = struct {
             .data = .{
                 .fn_decl = .{
                     .name = name_tok.slice,
+                    .is_pub = is_pub,
                     .params = try params.toOwnedSlice(),
                     .return_type = ret_type,
                     .body_expr = body_expr,
+                    .loc = name_tok.loc,
                 },
             },
         };
@@ -550,6 +553,13 @@ pub const Parser = struct {
             const cond = try self.parseExpr(alloc);
             _ = try self.expect(.r_paren);
 
+            var capture: ?[]const u8 = null;
+            if (self.match(.pipe)) {
+                const cap = try self.expect(.identifier);
+                _ = try self.expect(.pipe);
+                capture = cap.slice;
+            }
+
             _ = try self.expect(.l_brace);
             var then_stmts = ArrayList(ast.Statement).init(alloc);
             while (!self.check(.r_brace) and !self.check(.eof)) {
@@ -581,6 +591,7 @@ pub const Parser = struct {
                 .data = .{
                     .if_stmt = .{
                         .cond = cond,
+                        .capture = capture,
                         .then_stmts = try then_stmts.toOwnedSlice(),
                         .else_stmts = else_stmts,
                     },
@@ -612,6 +623,13 @@ pub const Parser = struct {
 
                 _ = try self.expect(.fat_arrow);
 
+                var capture: ?[]const u8 = null;
+                if (self.match(.pipe)) {
+                    const cap = try self.expect(.identifier);
+                    _ = try self.expect(.pipe);
+                    capture = cap.slice;
+                }
+
                 // Case body: either single statement or { statements }
                 var body_stmts = ArrayList(ast.Statement).init(alloc);
                 if (self.match(.l_brace)) {
@@ -627,6 +645,7 @@ pub const Parser = struct {
 
                 try cases.append(.{
                     .patterns = try patterns.toOwnedSlice(),
+                    .capture = capture,
                     .is_else = is_else,
                     .body = try body_stmts.toOwnedSlice(),
                     .loc = case_loc,
@@ -714,6 +733,19 @@ pub const Parser = struct {
     pub fn parseType(self: *Parser, alloc: std.mem.Allocator) ParseError!*ast.Type {
         const type_loc = self.current.loc;
 
+        if (self.match(.question_mark)) {
+            const child_type = try self.parseType(alloc);
+            const t = try alloc.create(ast.Type);
+            t.* = .{
+                .tag = .optional,
+                .loc = type_loc,
+                .data = .{
+                    .optional = child_type,
+                },
+            };
+            return t;
+        }
+
         if (self.match(.l_bracket)) {
             const len_expr = try self.parseExpr(alloc);
             _ = try self.expect(.r_bracket);
@@ -737,17 +769,27 @@ pub const Parser = struct {
             _ = try self.expect(.kw_struct);
             _ = try self.expect(.l_brace);
             var fields = ArrayList(ast.StructField).init(alloc);
+            var methods = ArrayList(ast.FnDecl).init(alloc);
             while (!self.check(.r_brace) and !self.check(.eof)) {
-                const f_loc = self.current.loc;
-                const f_name = try self.expect(.identifier);
-                _ = try self.expect(.colon);
-                const f_type = try self.parseType(alloc);
-                _ = self.match(.comma);
-                try fields.append(.{
-                    .name = f_name.slice,
-                    .type_expr = f_type,
-                    .loc = f_loc,
-                });
+                if (self.check(.kw_pub) or self.check(.kw_fn)) {
+                    const is_pub = self.match(.kw_pub);
+                    _ = try self.expect(.kw_fn);
+                    const m = try self.parseFnDecl(alloc, is_pub);
+                    try methods.append(m.data.fn_decl);
+                    _ = self.match(.semicolon);
+                    _ = self.match(.comma);
+                } else {
+                    const f_loc = self.current.loc;
+                    const f_name = try self.expect(.identifier);
+                    _ = try self.expect(.colon);
+                    const f_type = try self.parseType(alloc);
+                    _ = self.match(.comma);
+                    try fields.append(.{
+                        .name = f_name.slice,
+                        .type_expr = f_type,
+                        .loc = f_loc,
+                    });
+                }
             }
             _ = try self.expect(.r_brace);
 
@@ -758,6 +800,7 @@ pub const Parser = struct {
                 .data = .{
                     .packed_struct = .{
                         .fields = try fields.toOwnedSlice(),
+                        .methods = try methods.toOwnedSlice(),
                     },
                 },
             };
@@ -796,6 +839,67 @@ pub const Parser = struct {
                     .enum_type = .{
                         .tag_type = tag_type,
                         .fields = try fields.toOwnedSlice(),
+                    },
+                },
+            };
+            return t;
+        }
+
+        if (self.match(.kw_union)) {
+            _ = try self.expect(.l_paren);
+            var tag_type: ?*ast.Type = null;
+            if (self.match(.kw_enum)) {
+                if (self.match(.l_paren)) {
+                    tag_type = try self.parseType(alloc);
+                    _ = try self.expect(.r_paren);
+                }
+            } else {
+                tag_type = try self.parseType(alloc);
+            }
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.l_brace);
+
+            var fields = ArrayList(ast.UnionField).init(alloc);
+            var methods = ArrayList(ast.FnDecl).init(alloc);
+            while (!self.check(.r_brace) and !self.check(.eof)) {
+                if (self.check(.kw_pub) or self.check(.kw_fn)) {
+                    const is_pub = self.match(.kw_pub);
+                    _ = try self.expect(.kw_fn);
+                    const m = try self.parseFnDecl(alloc, is_pub);
+                    try methods.append(m.data.fn_decl);
+                    _ = self.match(.semicolon);
+                    _ = self.match(.comma);
+                } else {
+                    const f_loc = self.current.loc;
+                    const f_name = try self.expect(.identifier);
+                    var f_type: ?*ast.Type = null;
+                    if (self.match(.colon)) {
+                        if (self.check(.identifier) and std.mem.eql(u8, self.current.slice, "void")) {
+                            self.advance();
+                            f_type = null;
+                        } else {
+                            f_type = try self.parseType(alloc);
+                        }
+                    }
+                    _ = self.match(.comma);
+                    try fields.append(.{
+                        .name = f_name.slice,
+                        .type_expr = f_type,
+                        .loc = f_loc,
+                    });
+                }
+            }
+            _ = try self.expect(.r_brace);
+
+            const t = try alloc.create(ast.Type);
+            t.* = .{
+                .tag = .tagged_union,
+                .loc = type_loc,
+                .data = .{
+                    .tagged_union = .{
+                        .tag_type = tag_type,
+                        .fields = try fields.toOwnedSlice(),
+                        .methods = try methods.toOwnedSlice(),
                     },
                 },
             };
@@ -883,7 +987,7 @@ pub const Parser = struct {
 
     fn parseLogicalOr(self: *Parser, alloc: std.mem.Allocator) ParseError!*ast.Expr {
         var left = try self.parseLogicalAnd(alloc);
-        while (self.match(.pipe_pipe)) {
+        while (self.match(.pipe_pipe) or self.match(.kw_or)) {
             const right = try self.parseLogicalAnd(alloc);
             const e = try alloc.create(ast.Expr);
             e.* = .{
@@ -904,7 +1008,7 @@ pub const Parser = struct {
 
     fn parseLogicalAnd(self: *Parser, alloc: std.mem.Allocator) ParseError!*ast.Expr {
         var left = try self.parseBitwiseOr(alloc);
-        while (self.match(.ampersand_ampersand)) {
+        while (self.match(.ampersand_ampersand) or self.match(.kw_and)) {
             const right = try self.parseBitwiseOr(alloc);
             const e = try alloc.create(ast.Expr);
             e.* = .{
@@ -1176,6 +1280,46 @@ pub const Parser = struct {
                         },
                     };
                     expr = e;
+                } else if (self.match(.colon)) {
+                    // Verilog-style slice: [msb:lsb], e.g. [7:0]
+                    const lsb_expr = try self.parseExpr(alloc);
+                    _ = try self.expect(.r_bracket);
+
+                    var start_e = lsb_expr;
+                    var end_e = lsb_expr;
+                    if (start_expr.tag == .number and lsb_expr.tag == .number) {
+                        const hi = start_expr.data.number.val;
+                        const lo = lsb_expr.data.number.val;
+                        const s_node = try alloc.create(ast.Expr);
+                        s_node.* = .{
+                            .tag = .number,
+                            .loc = lsb_expr.loc,
+                            .data = .{ .number = .{ .val = lo, .raw = try std.fmt.allocPrint(alloc, "{d}", .{lo}) } },
+                        };
+                        const e_node = try alloc.create(ast.Expr);
+                        e_node.* = .{
+                            .tag = .number,
+                            .loc = start_expr.loc,
+                            .data = .{ .number = .{ .val = hi + 1, .raw = try std.fmt.allocPrint(alloc, "{d}", .{hi + 1}) } },
+                        };
+                        start_e = s_node;
+                        end_e = e_node;
+                    }
+
+                    const e = try alloc.create(ast.Expr);
+                    e.* = .{
+                        .tag = .slice,
+                        .loc = start_expr.loc,
+                        .data = .{
+                            .slice = .{
+                                .target = expr,
+                                .start = start_e,
+                                .end = end_e,
+                                .is_downward = false,
+                            },
+                        },
+                    };
+                    expr = e;
                 } else {
                     _ = try self.expect(.r_bracket);
                     const e = try alloc.create(ast.Expr);
@@ -1219,6 +1363,24 @@ pub const Parser = struct {
         return expr;
     }
 
+    fn parseStructInitFields(self: *Parser, alloc: std.mem.Allocator) ParseError![]ast.NamedExpr {
+        var fields = ArrayList(ast.NamedExpr).init(alloc);
+        while (!self.check(.r_brace) and !self.check(.eof)) {
+            _ = try self.expect(.dot);
+            const f_name = try self.expect(.identifier);
+            _ = try self.expect(.equal);
+            const f_val = try self.parseExpr(alloc);
+            try fields.append(.{
+                .name = f_name.slice,
+                .value = f_val,
+                .loc = f_name.loc,
+            });
+            if (!self.match(.comma)) break;
+        }
+        _ = try self.expect(.r_brace);
+        return try fields.toOwnedSlice();
+    }
+
     fn parsePrimary(self: *Parser, alloc: std.mem.Allocator) ParseError!*ast.Expr {
         const loc = self.current.loc;
 
@@ -1227,7 +1389,19 @@ pub const Parser = struct {
             const raw = self.current.slice;
             self.advance();
             var val: u64 = 0;
-            if (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) {
+            if (std.mem.indexOfScalar(u8, raw, '\'')) |quote_pos| {
+                if (quote_pos + 1 < raw.len) {
+                    const base_ch = raw[quote_pos + 1];
+                    const digits = raw[quote_pos + 2 ..];
+                    if (base_ch == 'h' or base_ch == 'H') {
+                        val = parseHex(digits) catch 0;
+                    } else if (base_ch == 'b' or base_ch == 'B') {
+                        val = parseBin(digits) catch 0;
+                    } else if (base_ch == 'd' or base_ch == 'D') {
+                        val = parseDec(digits) catch 0;
+                    }
+                }
+            } else if (raw.len > 2 and raw[0] == '0' and (raw[1] == 'x' or raw[1] == 'X')) {
                 val = parseHex(raw[2..]) catch 0;
             } else if (raw.len > 2 and raw[0] == '0' and (raw[1] == 'b' or raw[1] == 'B')) {
                 val = parseBin(raw[2..]) catch 0;
@@ -1261,6 +1435,13 @@ pub const Parser = struct {
             return e;
         }
 
+        // Null literal
+        if (self.match(.kw_null)) {
+            const e = try alloc.create(ast.Expr);
+            e.* = .{ .tag = .null_lit, .loc = loc, .data = .{ .null_lit = {} } };
+            return e;
+        }
+
         // String literal
         if (self.check(.string_literal)) {
             const s = self.current.slice;
@@ -1277,20 +1458,7 @@ pub const Parser = struct {
             if (self.check(.l_brace)) {
                 // Anonymous struct init: .{ .a = 1, .b = 2 }
                 self.advance();
-                var fields = ArrayList(ast.NamedExpr).init(alloc);
-                while (!self.check(.r_brace) and !self.check(.eof)) {
-                    _ = try self.expect(.dot);
-                    const f_name = try self.expect(.identifier);
-                    _ = try self.expect(.equal);
-                    const f_val = try self.parseExpr(alloc);
-                    try fields.append(.{
-                        .name = f_name.slice,
-                        .value = f_val,
-                        .loc = f_name.loc,
-                    });
-                    if (!self.match(.comma)) break;
-                }
-                _ = try self.expect(.r_brace);
+                const fields = try self.parseStructInitFields(alloc);
 
                 const e = try alloc.create(ast.Expr);
                 e.* = .{
@@ -1299,7 +1467,7 @@ pub const Parser = struct {
                     .data = .{
                         .struct_init = .{
                             .type_expr = null,
-                            .fields = try fields.toOwnedSlice(),
+                            .fields = fields,
                         },
                     },
                 };
@@ -1348,15 +1516,13 @@ pub const Parser = struct {
         if (self.match(.kw_module)) {
             const items = try self.parseModuleBody(alloc);
             const e = try alloc.create(ast.Expr);
-            // Store as a module decl expression node
             e.* = .{
-                .tag = .identifier, // represented or wrapped
+                .tag = .module_literal,
                 .loc = loc,
                 .data = .{
-                    .identifier = "__inline_module__",
+                    .module_literal = items,
                 },
             };
-            _ = items;
             return e;
         }
 
@@ -1391,14 +1557,55 @@ pub const Parser = struct {
             return e;
         }
 
-        // Identifier
+        // Type expressions: ?T, packed struct { ... } or enum { ... } or union(...) { ... }
+        if (self.check(.question_mark) or self.check(.kw_packed) or self.check(.kw_enum) or self.check(.kw_union)) {
+            const t = try self.parseType(alloc);
+            const e = try alloc.create(ast.Expr);
+            e.* = .{
+                .tag = .type_expr,
+                .loc = loc,
+                .data = .{
+                    .type_expr = t,
+                },
+            };
+            return e;
+        }
+
+        // Identifier or Named struct init: MyStruct{ .field1 = val1, ... }
         if (self.check(.identifier)) {
             const name = self.current.slice;
+            const id_loc = self.current.loc;
             self.advance();
+
+            if (self.check(.l_brace) and (self.peek_token.tag == .dot or self.peek_token.tag == .r_brace)) {
+                self.advance(); // consume '{'
+                const fields = try self.parseStructInitFields(alloc);
+                const t = try alloc.create(ast.Type);
+                t.* = .{
+                    .tag = .named,
+                    .loc = id_loc,
+                    .data = .{
+                        .named = name,
+                    },
+                };
+                const e = try alloc.create(ast.Expr);
+                e.* = .{
+                    .tag = .struct_init,
+                    .loc = id_loc,
+                    .data = .{
+                        .struct_init = .{
+                            .type_expr = t,
+                            .fields = fields,
+                        },
+                    },
+                };
+                return e;
+            }
+
             const e = try alloc.create(ast.Expr);
             e.* = .{
                 .tag = .identifier,
-                .loc = loc,
+                .loc = id_loc,
                 .data = .{
                     .identifier = name,
                 },

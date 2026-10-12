@@ -42,11 +42,15 @@ pub const TokenType = enum {
     kw_struct,
     kw_packed,
     kw_enum,
+    kw_union,
     kw_switch,
     kw_if,
     kw_else,
     kw_true,
     kw_false,
+    kw_null,
+    kw_and,
+    kw_or,
 
     // Builtins (starting with '@')
     builtin_import,
@@ -65,6 +69,7 @@ pub const TokenType = enum {
     fat_arrow, // =>
     dot, // .
     dot_dot, // ..
+    question_mark, // ?
     colon, // :
     semicolon, // ;
     comma, // ,
@@ -153,11 +158,15 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "struct", .kw_struct },
     .{ "packed", .kw_packed },
     .{ "enum", .kw_enum },
+    .{ "union", .kw_union },
     .{ "switch", .kw_switch },
     .{ "if", .kw_if },
     .{ "else", .kw_else },
     .{ "true", .kw_true },
     .{ "false", .kw_false },
+    .{ "null", .kw_null },
+    .{ "and", .kw_and },
+    .{ "or", .kw_or },
 });
 
 pub const builtins = std.StaticStringMap(TokenType).initComptime(.{

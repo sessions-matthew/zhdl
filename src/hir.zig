@@ -15,6 +15,8 @@ pub const HirTypeTag = enum {
     enum_type,
     packed_struct,
     array,
+    optional,
+    tagged_union,
 };
 
 pub const HirEnumVariant = struct {
@@ -28,6 +30,12 @@ pub const HirStructField = struct {
     offset: u32, // bit offset from LSB
 };
 
+pub const HirUnionField = struct {
+    name: []const u8,
+    tag_value: u64,
+    payload_width: u32,
+};
+
 pub const HirType = struct {
     tag: HirTypeTag,
     width: u32, // total bit width
@@ -35,7 +43,9 @@ pub const HirType = struct {
     name: []const u8 = "",
     enum_variants: []HirEnumVariant = &.{},
     struct_fields: []HirStructField = &.{},
+    union_fields: []HirUnionField = &.{},
     elem_width: u32 = 0,
+    tag_width: u32 = 0,
     array_len: u32 = 0,
 
     pub fn isClock(self: HirType) bool {
@@ -44,6 +54,27 @@ pub const HirType = struct {
 
     pub fn isReset(self: HirType) bool {
         return self.tag == .reset;
+    }
+
+    pub fn getStructField(self: HirType, field_name: []const u8) ?HirStructField {
+        for (self.struct_fields) |f| {
+            if (std.mem.eql(u8, f.name, field_name)) return f;
+        }
+        return null;
+    }
+
+    pub fn getUnionField(self: HirType, field_name: []const u8) ?HirUnionField {
+        for (self.union_fields) |f| {
+            if (std.mem.eql(u8, f.name, field_name)) return f;
+        }
+        return null;
+    }
+
+    pub fn getUnionFieldByTag(self: HirType, tag_val: u64) ?HirUnionField {
+        for (self.union_fields) |f| {
+            if (f.tag_value == tag_val) return f;
+        }
+        return null;
     }
 };
 

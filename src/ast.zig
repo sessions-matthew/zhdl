@@ -15,6 +15,8 @@ pub const TypeTag = enum {
     enum_type,
     packed_struct,
     array,
+    optional,
+    tagged_union,
 };
 
 pub const EnumField = struct {
@@ -26,6 +28,12 @@ pub const EnumField = struct {
 pub const StructField = struct {
     name: []const u8,
     type_expr: *Type,
+    loc: SourceLoc,
+};
+
+pub const UnionField = struct {
+    name: []const u8,
+    type_expr: ?*Type, // null if void or empty payload
     loc: SourceLoc,
 };
 
@@ -44,10 +52,17 @@ pub const Type = struct {
         },
         packed_struct: struct {
             fields: []StructField,
+            methods: []FnDecl = &.{},
         },
         array: struct {
             len: *Expr,
             elem_type: *Type,
+        },
+        optional: *Type,
+        tagged_union: struct {
+            tag_type: ?*Type,
+            fields: []UnionField,
+            methods: []FnDecl = &.{},
         },
     },
 };
@@ -64,6 +79,7 @@ pub const ExprTag = enum {
     string,
     identifier,
     enum_literal, // e.g. .idle
+    null_lit,
     unary,
     binary,
     index,
@@ -73,6 +89,8 @@ pub const ExprTag = enum {
     builtin_call,
     struct_init,
     if_expr,
+    type_expr,
+    module_literal,
 };
 
 pub const Expr = struct {
@@ -87,6 +105,7 @@ pub const Expr = struct {
         string: []const u8,
         identifier: []const u8,
         enum_literal: []const u8,
+        null_lit: void,
         unary: struct {
             op: TokenType,
             operand: *Expr,
@@ -127,11 +146,14 @@ pub const Expr = struct {
             then_branch: *Expr,
             else_branch: *Expr,
         },
+        type_expr: *Type,
+        module_literal: []ModuleItem,
     },
 };
 
 pub const SwitchCase = struct {
     patterns: []*Expr, // empty if is_else is true
+    capture: ?[]const u8 = null,
     is_else: bool,
     body: []Statement,
     loc: SourceLoc,
@@ -162,6 +184,7 @@ pub const Statement = struct {
         },
         if_stmt: struct {
             cond: *Expr,
+            capture: ?[]const u8 = null,
             then_stmts: []Statement,
             else_stmts: ?[]Statement,
         },
@@ -242,6 +265,15 @@ pub const FnParam = struct {
     loc: SourceLoc,
 };
 
+pub const FnDecl = struct {
+    name: []const u8,
+    is_pub: bool = false,
+    params: []FnParam,
+    return_type: ?*Type,
+    body_expr: *Expr,
+    loc: SourceLoc,
+};
+
 pub const DeclTag = enum {
     const_decl,
     fn_decl,
@@ -259,12 +291,7 @@ pub const Decl = struct {
             type_annot: ?*Type,
             val: *Expr,
         },
-        fn_decl: struct {
-            name: []const u8,
-            params: []FnParam,
-            return_type: ?*Type,
-            body_expr: *Expr, // function returning a module expr or value
-        },
+        fn_decl: FnDecl,
         module_decl: struct {
             name: []const u8,
             items: []ModuleItem,
