@@ -1,0 +1,155 @@
+//! Programmable Hardware Watchdog Timer (WDT) Peripheral
+//!
+//! Demonstrates:
+//! 1. Real-time system protection and failure-recovery peripheral logic.
+//! 2. Advanced simulation constructs:
+//!    - 'wait_for(condition, timeout)' with real-time nanosecond timeouts.
+//!    - 'assert_within(condition, timeout)' for bounded response-time verification.
+//!    - Physical simulation delays with explicit units ('delay(20ns)').
+//! 3. Two-stage watchdog trip: early pre-timeout warning interrupt ('wdt_warn_irq')
+//!    followed by hard system reset trigger ('wdt_reset_out').
+//! 4. Heartbeat clear / service ('pet') strobes.
+
+pub const WatchdogTimer = module {
+    in clk: clock,
+    in rst: reset,
+
+    in enable: u1,
+    in pet: u1,
+    in reload_val: u16,
+    in warn_threshold: u16,
+
+    out wdt_warn_irq: u1,
+    out wdt_reset_out: u1,
+    out count_val: u16,
+    out is_expired: u1,
+
+    reg r_count: u16 = 0;
+    reg r_warn_irq: u1 = 0;
+    reg r_reset_out: u1 = 0;
+    reg r_expired: u1 = 0;
+
+    comb {
+        if (!enable) {
+            r_count := reload_val;
+            r_warn_irq := 0;
+            r_reset_out := 0;
+            r_expired := 0;
+        } else if (pet) {
+            r_count := reload_val;
+            r_warn_irq := 0;
+            r_reset_out := 0;
+            r_expired := 0;
+        } else if (r_count == 0) {
+            // Watchdog timed out! Assert reset trigger and latch expired flag
+            r_count := 0;
+            r_warn_irq := 1;
+            r_reset_out := 1;
+            r_expired := 1;
+        } else {
+            // Decrement countdown
+            wire next_count: u16 = r_count -% 1;
+            r_count := next_count;
+            r_reset_out := 0;
+
+            // Trigger early warning interrupt if below or at threshold
+            if (warn_threshold > 0 and next_count <= warn_threshold) {
+                r_warn_irq := 1;
+            } else {
+                r_warn_irq := 0;
+            }
+        }
+
+        wdt_warn_irq = r_warn_irq;
+        wdt_reset_out = r_reset_out;
+        count_val = r_count;
+        is_expired = r_expired;
+    }
+};
+
+test "WatchdogTimer handles service pet, warning interrupt, and timeout reset" {
+    wire clk: clock;
+    wire rst: reset;
+
+    wire enable: u1;
+    wire pet: u1;
+    wire reload_val: u16;
+    wire warn_threshold: u16;
+
+    wire wdt_warn_irq: u1;
+    wire wdt_reset_out: u1;
+    wire count_val: u16;
+    wire is_expired: u1;
+
+    const dut = WatchdogTimer.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .enable = enable,
+        .pet = pet,
+        .reload_val = reload_val,
+        .warn_threshold = warn_threshold,
+        .wdt_warn_irq = wdt_warn_irq,
+        .wdt_reset_out = wdt_reset_out,
+        .count_val = count_val,
+        .is_expired = is_expired,
+    });
+
+    sim {
+        trace("watchdog_timer_tb.vcd");
+        clk.generate(100MHz); // 10ns clock period
+        rst.pulse(2);
+
+        // 1. Initial configuration: 8-tick timeout, warning at 3 ticks
+        clk.negedge();
+        enable = 1;
+        pet = 1;
+        reload_val = 8;
+        warn_threshold = 3;
+
+        clk.posedge();
+        clk.negedge();
+        pet = 0; // Release pet strobe; countdown begins
+
+        // 2. Pet the watchdog before warning is reached
+        // Run 3 cycles: count decrements 8 -> 7 -> 6 -> 5
+        clk.posedge();
+        clk.posedge();
+        clk.posedge();
+        clk.negedge();
+        assert(wdt_warn_irq == 0, "Warning interrupt must not fire early");
+        assert(wdt_reset_out == 0, "Reset must not fire during normal execution");
+
+        // Service the watchdog ('pet')
+        pet = 1;
+        clk.posedge();
+        clk.negedge();
+        pet = 0;
+        assert(count_val == 8, "Watchdog successfully reloaded to 8 ticks");
+
+        // 3. Now let the watchdog run down to the warning threshold
+        // Use real-time wait_for: count goes 8->7->6->5->4->3 (reaches warning in ~50ns)
+        wait_for(wdt_warn_irq == 1, 150ns);
+        assert(wdt_warn_irq == 1, "Warning interrupt fired within 150ns window");
+        assert(wdt_reset_out == 0, "System reset not yet triggered during warning phase");
+
+        // 4. Wait for watchdog to completely expire and trigger system reset
+        // Count goes 3->2->1->0 (approx 30ns more)
+        assert_within(wdt_reset_out == 1, 100ns);
+        assert(wdt_reset_out == 1, "Watchdog reset pulse asserted on timeout expiry");
+        assert(is_expired == 1, "Expired sticky flag latched high");
+
+        // 5. Test physical delay with explicit units
+        delay(20ns);
+        assert(is_expired == 1, "Expired flag remains latched");
+
+        // 6. Disable watchdog and verify safe reset
+        clk.negedge();
+        enable = 0;
+        clk.posedge();
+        delay(1);
+        assert(wdt_reset_out == 0, "Reset deasserted when watchdog disabled");
+        assert(is_expired == 0, "Expired flag cleared when watchdog disabled");
+
+        finish();
+    }
+}

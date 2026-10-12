@@ -195,6 +195,10 @@ The [`examples/`](examples/) directory includes full, self-contained hardware de
 
 | Example | Highlights & Language Features Demonstrated |
 |---|---|
+| [`network_packet.zhdl`](examples/network_packet.zhdl) | Network frame parser with `@byteSwap` (network big-endian to host little-endian conversion), `@bitReverse` (serial streaming bit reflection), `@clog2` width calculation, compile-time unrolling with `inline for (0..4) \|i\|`, and downward bit slicing `[31..0]`. |
+| [`register_file.zhdl`](examples/register_file.zhdl) | 32-entry dual-read single-write unpacked register memory array (`reg bank: [32]u32 = 0`), write-through forwarding bypass (RAW hazard avoidance), hardwired `x0` zero immutability, and race-free negedge stimulus timing. |
+| [`signed_dsp.zhdl`](examples/signed_dsp.zhdl) | Signed bit-vectors (`i8`, `i16`, `i32`), SystemVerilog `logic signed` emission, signed multiplication and arithmetic (`*`, `+%`, `-%`), signed relational comparisons (`< 0`, `> 0`), and two's complement saturating clamp. |
+| [`watchdog_timer.zhdl`](examples/watchdog_timer.zhdl) | Programmable watchdog timer peripheral with prescaler, reload strobe (`pet`), pre-timeout warning interrupt (`wdt_warn_irq`), hard system reset pulse (`wdt_reset_out`), and real-time verification (`wait_for(cond, 150ns)`, `assert_within(cond, 100ns)`, `delay(20ns)`). |
 | [`blackbox_dsp.zhdl`](examples/blackbox_dsp.zhdl) | `extern("DSP48E1", .{ .include = "..." })` black box IP integration, compile-time Verilog parameter overrides (`.A_WIDTH`, `.B_WIDTH`), synthesizable stubs, and 100MHz behavioral testbench. |
 | [`riscv_decoder.zhdl`](examples/riscv_decoder.zhdl) | Complete RV32I instruction decoder and execution unit using `packed struct` with type methods (`isSub()`, `getSignExtendedImm()`, `getLuiVal()`, `getBranchOffset()`), hardware tagged unions `union(enum)`, pattern matching `switch`, and bit-exact sign-extension. |
 | [`skid_buffer.zhdl`](examples/skid_buffer.zhdl) | Zero-bubble elastic pipeline stream buffering with ready/valid backpressure, hardware optionals `?T`, `null` checks, auto-wrapping, and 2-entry internal queueing. |

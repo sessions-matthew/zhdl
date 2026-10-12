@@ -2060,6 +2060,14 @@ pub const Elaborator = struct {
 
                 if (val_expr.tag == .lit and target.hir_type.width > 0) {
                     val_expr.hir_type.width = target.hir_type.width;
+                    if (target.hir_type.is_signed) val_expr.hir_type.is_signed = true;
+                } else if (val_expr.tag == .unary and val_expr.data.unary.operand.tag == .lit and target.hir_type.width > 0) {
+                    val_expr.hir_type.width = target.hir_type.width;
+                    val_expr.data.unary.operand.hir_type.width = target.hir_type.width;
+                    if (target.hir_type.is_signed) {
+                        val_expr.hir_type.is_signed = true;
+                        val_expr.data.unary.operand.hir_type.is_signed = true;
+                    }
                 }
                 try sim_stmts.append(.{
                     .tag = .assign,
@@ -2951,6 +2959,14 @@ pub const Elaborator = struct {
                 }
                 if (val_expr.tag == .lit and target_expr.hir_type.width > 0) {
                     val_expr.hir_type.width = target_expr.hir_type.width;
+                    if (target_expr.hir_type.is_signed) val_expr.hir_type.is_signed = true;
+                } else if (val_expr.tag == .unary and val_expr.data.unary.operand.tag == .lit and target_expr.hir_type.width > 0) {
+                    val_expr.hir_type.width = target_expr.hir_type.width;
+                    val_expr.data.unary.operand.hir_type.width = target_expr.hir_type.width;
+                    if (target_expr.hir_type.is_signed) {
+                        val_expr.hir_type.is_signed = true;
+                        val_expr.data.unary.operand.hir_type.is_signed = true;
+                    }
                 }
                 try out_stmts.append(.{
                     .tag = .assign,
@@ -3022,15 +3038,17 @@ pub const Elaborator = struct {
                     val.hir_type.width = h_type.width;
                 }
 
-                try out_stmts.append(.{
-                    .tag = .assign,
-                    .data = .{
-                        .assign = .{
-                            .target = target,
-                            .value = val,
+                if (h_type.tag != .array) {
+                    try out_stmts.append(.{
+                        .tag = .assign,
+                        .data = .{
+                            .assign = .{
+                                .target = target,
+                                .value = val,
+                            },
                         },
-                    },
-                });
+                    });
+                }
             },
             .if_stmt => {
                 const ifs = stmt.data.if_stmt;
@@ -3505,8 +3523,24 @@ pub const Elaborator = struct {
                 if (b.op != .shl and b.op != .shr) {
                     if (left.hir_type.width > 0 and right.tag == .lit) {
                         right.hir_type.width = left.hir_type.width;
+                        if (left.hir_type.is_signed) right.hir_type.is_signed = true;
                     } else if (right.hir_type.width > 0 and left.tag == .lit) {
                         left.hir_type.width = right.hir_type.width;
+                        if (right.hir_type.is_signed) left.hir_type.is_signed = true;
+                    } else if (left.hir_type.width > 0 and right.tag == .unary and right.data.unary.operand.tag == .lit) {
+                        right.hir_type.width = left.hir_type.width;
+                        right.data.unary.operand.hir_type.width = left.hir_type.width;
+                        if (left.hir_type.is_signed) {
+                            right.hir_type.is_signed = true;
+                            right.data.unary.operand.hir_type.is_signed = true;
+                        }
+                    } else if (right.hir_type.width > 0 and left.tag == .unary and left.data.unary.operand.tag == .lit) {
+                        left.hir_type.width = right.hir_type.width;
+                        left.data.unary.operand.hir_type.width = right.hir_type.width;
+                        if (right.hir_type.is_signed) {
+                            left.hir_type.is_signed = true;
+                            left.data.unary.operand.hir_type.is_signed = true;
+                        }
                     }
                 }
 
@@ -3628,6 +3662,7 @@ pub const Elaborator = struct {
                                 const id_name = type_arg.data.identifier;
                                 if ((id_name[0] == 'u' or id_name[0] == 'i') and id_name.len > 1) {
                                     target_w = std.fmt.parseInt(u32, id_name[1..], 10) catch 32;
+                                    target_type = hir.HirType{ .tag = .bits, .width = target_w, .is_signed = (id_name[0] == 'i') };
                                 } else if (self.types.get(id_name)) |found_t| {
                                     target_type = found_t;
                                     target_w = found_t.width;
@@ -3640,10 +3675,13 @@ pub const Elaborator = struct {
                             const val_arg = bc.args[1];
                             const sub = try self.lowerExpr(alloc, val_arg, reg_map, signal_types);
 
+                            const is_signed_cast = sub.hir_type.is_signed or (target_type != null and target_type.?.is_signed);
+                            const effective_type = if (target_type) |tt| tt else hir.HirType{ .tag = .bits, .width = target_w, .is_signed = is_signed_cast };
+
                             if (bc.tag == .builtin_truncate and sub.tag != .lit and sub.hir_type.width > target_w) {
                                 h_expr.* = .{
                                     .tag = .slice,
-                                    .hir_type = if (target_type) |tt| tt else hir.HirType{ .tag = .bits, .width = target_w },
+                                    .hir_type = effective_type,
                                     .data = .{
                                         .slice = .{
                                             .target = sub,
@@ -3654,21 +3692,36 @@ pub const Elaborator = struct {
                                     },
                                 };
                             } else if ((bc.tag == .builtin_as or bc.tag == .builtin_bit_cast) and sub.tag != .lit and target_w > sub.hir_type.width) {
-                                const pad_w = target_w - sub.hir_type.width;
-                                const zero_lit = try alloc.create(hir.HirExpr);
-                                zero_lit.* = .{
-                                    .tag = .lit,
-                                    .hir_type = .{ .tag = .bits, .width = pad_w },
-                                    .data = .{ .lit = .{ .val = 0, .raw = "0" } },
-                                };
-                                var cat_args = try alloc.alloc(*hir.HirExpr, 2);
-                                cat_args[0] = zero_lit;
-                                cat_args[1] = sub;
-                                h_expr.* = .{
-                                    .tag = .concat,
-                                    .hir_type = if (target_type) |tt| tt else hir.HirType{ .tag = .bits, .width = target_w },
-                                    .data = .{ .concat = .{ .args = cat_args } },
-                                };
+                                if (is_signed_cast) {
+                                    h_expr.* = .{
+                                        .tag = .slice,
+                                        .hir_type = effective_type,
+                                        .data = .{
+                                            .slice = .{
+                                                .target = sub,
+                                                .start = 0,
+                                                .end = target_w,
+                                                .is_downward = false,
+                                            },
+                                        },
+                                    };
+                                } else {
+                                    const pad_w = target_w - sub.hir_type.width;
+                                    const zero_lit = try alloc.create(hir.HirExpr);
+                                    zero_lit.* = .{
+                                        .tag = .lit,
+                                        .hir_type = .{ .tag = .bits, .width = pad_w },
+                                        .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                                    };
+                                    var cat_args = try alloc.alloc(*hir.HirExpr, 2);
+                                    cat_args[0] = zero_lit;
+                                    cat_args[1] = sub;
+                                    h_expr.* = .{
+                                        .tag = .concat,
+                                        .hir_type = effective_type,
+                                        .data = .{ .concat = .{ .args = cat_args } },
+                                    };
+                                }
                             } else {
                                 if (sub.tag == .lit and target_w < 64) {
                                     sub.data.lit.val = sub.data.lit.val & ((@as(u64, 1) << @intCast(target_w)) - 1);

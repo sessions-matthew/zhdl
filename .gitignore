@@ -4,3 +4,4 @@ zhdl
 *.sv
 .zhdl_sim/
 *.vcd
+obj_dir/

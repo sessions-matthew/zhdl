@@ -1,0 +1,162 @@
+//! 32-Bit Dual-Read Single-Write Register File with Internal Forwarding
+//!
+//! Demonstrates:
+//! 1. Unpacked array register memory ('reg bank: [32]u32 = 0').
+//! 2. Simultaneous dual asynchronous read ports (rs1, rs2).
+//! 3. Synchronous write port with write-enable gating.
+//! 4. Internal forwarding / write-through bypass logic (RAW hazard resolution).
+//! 5. Hardwired zero-register immutability (x0 is always 0).
+//! 6. Full self-contained testbench with cycle-accurate timing and waveform output.
+
+pub const RegisterFile = module {
+    in clk: clock,
+    in rst: reset,
+
+    // Read Port 1
+    in rs1_addr: u5,
+    out rs1_data: u32,
+
+    // Read Port 2
+    in rs2_addr: u5,
+    out rs2_data: u32,
+
+    // Write Port
+    in wr_en: u1,
+    in wr_addr: u5,
+    in wr_data: u32,
+
+    // Diagnostics
+    out r0_is_zero: u1,
+
+    // 32-entry register array (each entry 32 bits wide)
+    reg bank: [32]u32 = 0;
+
+    comb {
+        // Synchronous write update: x0 is hardwired to 0 (never written)
+        if (wr_en && (wr_addr != 0)) {
+            bank[wr_addr] := wr_data;
+        }
+
+        // Read Port 1 with Write-Through Forwarding (RAW hazard resolution)
+        if (rs1_addr == 0) {
+            rs1_data = 0;
+        } else if (wr_en && (wr_addr == rs1_addr)) {
+            rs1_data = wr_data; // Forward incoming write data immediately
+        } else {
+            rs1_data = bank[rs1_addr];
+        }
+
+        // Read Port 2 with Write-Through Forwarding
+        if (rs2_addr == 0) {
+            rs2_data = 0;
+        } else if (wr_en && (wr_addr == rs2_addr)) {
+            rs2_data = wr_data;
+        } else {
+            rs2_data = bank[rs2_addr];
+        }
+
+        r0_is_zero = (bank[0] == 0);
+    }
+};
+
+test "RegisterFile dual-read, write-forwarding, and x0 immutability" {
+    wire clk: clock;
+    wire rst: reset;
+
+    wire rs1_addr: u5;
+    wire rs2_addr: u5;
+    wire rs1_data: u32;
+    wire rs2_data: u32;
+
+    wire wr_en: u1;
+    wire wr_addr: u5;
+    wire wr_data: u32;
+    wire r0_is_zero: u1;
+
+    const dut = RegisterFile.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .rs1_addr = rs1_addr,
+        .rs2_addr = rs2_addr,
+        .rs1_data = rs1_data,
+        .rs2_data = rs2_data,
+        .wr_en = wr_en,
+        .wr_addr = wr_addr,
+        .wr_data = wr_data,
+        .r0_is_zero = r0_is_zero,
+    });
+
+    sim {
+        trace("register_file_tb.vcd");
+        clk.generate(100MHz);
+        rst.pulse(2);
+
+        // Initial state: rs1=0, rs2=0
+        rs1_addr = 0;
+        rs2_addr = 0;
+        wr_en = 0;
+        wr_addr = 0;
+        wr_data = 0;
+        step(clk, 1);
+        assert(rs1_data == 0, "x0 should read 0");
+        assert(rs2_data == 0, "x0 should read 0");
+        assert(r0_is_zero == 1, "r0_is_zero flag high");
+
+        // 1. Write to x1 = 0xAAAA_BBBB and x2 = 0x1234_5678
+        clk.negedge();
+        wr_en = 1;
+        wr_addr = 1;
+        wr_data = 32'hAAAABBBB;
+        clk.posedge();
+
+        clk.negedge();
+        wr_addr = 2;
+        wr_data = 32'h12345678;
+        clk.posedge();
+
+        clk.negedge();
+        wr_en = 0;
+
+        // 2. Dual parallel read: read x1 on Port 1 and x2 on Port 2 simultaneously
+        rs1_addr = 1;
+        rs2_addr = 2;
+        delay(1);
+        assert(rs1_data == 32'hAAAABBBB, "Port 1 reads x1");
+        assert(rs2_data == 32'h12345678, "Port 2 reads x2");
+
+        // 3. Write-Through Forwarding (RAW Hazard):
+        // While reading x3, write to x3 in the same cycle. Forwarded data should appear immediately!
+        clk.negedge();
+        rs1_addr = 3;
+        wr_en = 1;
+        wr_addr = 3;
+        wr_data = 32'hCAFEF00D;
+        delay(1);
+        assert(rs1_data == 32'hCAFEF00D, "Forwarding bypass should supply wr_data before clock edge");
+
+        // Clock edge commits write to array
+        clk.posedge();
+        clk.negedge();
+        wr_en = 0;
+        delay(1);
+        assert(rs1_data == 32'hCAFEF00D, "Array preserves written value after clock edge");
+
+        // 4. Verify x0 immutability: attempt to write 0xFFFFFFFF to x0
+        clk.negedge();
+        wr_en = 1;
+        wr_addr = 0;
+        wr_data = 32'hFFFFFFFF;
+        clk.posedge();
+
+        clk.negedge();
+        wr_en = 0;
+        rs1_addr = 0;
+        rs2_addr = 0;
+        delay(1);
+        assert(rs1_data == 0, "x0 must remain 0 despite write attempts");
+        assert(rs2_data == 0, "x0 must remain 0");
+        assert(r0_is_zero == 1, "r0_is_zero remains high");
+
+        finish();
+    }
+}

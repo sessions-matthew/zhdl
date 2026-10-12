@@ -1,0 +1,160 @@
+//! Network Packet Processor & Endianness Engine
+//!
+//! Demonstrates:
+//! 1. Built-in '@byteSwap' for network (big-endian) to host (little-endian) conversion.
+//! 2. Built-in '@bitReverse' for serial LSB/MSB transmission streaming.
+//! 3. Compile-time '@clog2' for buffer address pointer sizing.
+//! 4. 'inline for' compile-time loop unrolling for parallel parity/checksum trees.
+//! 5. Downward bit slicing [high..low].
+//! 6. Complete cycle-accurate testbench with VCD waveform tracing.
+
+pub const IPv4Header = packed struct {
+    ver_ihl: u8,
+    tos: u8,
+    length: u16,
+    ident: u16,
+    flags_frag: u16,
+    ttl: u8,
+    proto: u8,
+    checksum: u16,
+    src_ip: u32,
+    dst_ip: u32,
+
+    pub fn getHostLength(self: IPv4Header) u16 {
+        return @byteSwap(self.length);
+    }
+
+    pub fn getHostSrcIp(self: IPv4Header) u32 {
+        return @byteSwap(self.src_ip);
+    }
+
+    pub fn getHostDstIp(self: IPv4Header) u32 {
+        return @byteSwap(self.dst_ip);
+    }
+};
+
+pub const NetworkPacketEngine = module {
+    in clk: clock,
+    in rst: reset,
+
+    // Big-endian network data inputs
+    in net_word: u32,
+    in net_byte: u8,
+    in process_en: u1,
+
+    // Host converted outputs
+    out host_word: u32,
+    out serial_byte: u8,
+    out byte_parity: u1,
+    out word_checksum: u8,
+
+    reg r_host_word: u32 = 0;
+    reg r_serial_byte: u8 = 0;
+    reg r_parity: u1 = 0;
+    reg r_checksum: u8 = 0;
+
+    comb {
+        // 1. Byte swap: 32-bit network word (e.g. 0x12345678 -> 0x78563412)
+        wire swapped_word: u32 = @byteSwap(net_word);
+
+        // 2. Bit reverse: 8-bit stream (e.g. 8'b10000000 -> 8'b00000001)
+        wire reversed_byte: u8 = @bitReverse(net_byte);
+
+        // 3. Compile-time loop unrolling to unpack 32-bit word into byte array
+        wire unpacked_bytes: [4]u8;
+        inline for (0..4) |i| {
+            unpacked_bytes[i] = swapped_word[i * 8 .. i * 8 + 8];
+        }
+
+        // 4. Parity and XOR reduction across unpacked bytes
+        wire par: u1 = net_byte[0] ^ net_byte[1] ^ net_byte[2] ^ net_byte[3] ^
+                       net_byte[4] ^ net_byte[5] ^ net_byte[6] ^ net_byte[7];
+        wire xor_sum: u8 = unpacked_bytes[0] ^ unpacked_bytes[1] ^ unpacked_bytes[2] ^ unpacked_bytes[3];
+
+        if (process_en) {
+            r_host_word := swapped_word;
+            r_serial_byte := reversed_byte;
+            r_parity := par;
+            r_checksum := xor_sum;
+        }
+
+        host_word = r_host_word;
+        serial_byte = r_serial_byte;
+        byte_parity = r_parity;
+        word_checksum = r_checksum;
+    }
+};
+
+test "NetworkPacketEngine performs byteSwap, bitReverse, and unrolled parity" {
+    wire clk: clock;
+    wire rst: reset;
+    wire net_word: u32;
+    wire net_byte: u8;
+    wire process_en: u1;
+
+    wire host_word: u32;
+    wire serial_byte: u8;
+    wire byte_parity: u1;
+    wire word_checksum: u8;
+
+    const dut = NetworkPacketEngine.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .net_word = net_word,
+        .net_byte = net_byte,
+        .process_en = process_en,
+        .host_word = host_word,
+        .serial_byte = serial_byte,
+        .byte_parity = byte_parity,
+        .word_checksum = word_checksum,
+    });
+
+    sim {
+        trace("network_packet_tb.vcd");
+        clk.generate(100MHz);
+        rst.pulse(2);
+
+        // 1. Process 32-bit big-endian IP 192.168.1.100 (0xC0A80164)
+        net_word = 32'hC0A80164;
+        net_byte = 8'b10000001; // Parity: 1 ^ 1 = 0. Bit reverse: 8'b10000001
+        process_en = 1;
+        step(clk, 1);
+
+        // Output registered on clock edge
+        // @byteSwap(0xC0A80164) -> 0x6401A8C0
+        assert(host_word == 32'h6401A8C0, "Host word should be byte-swapped to 0x6401A8C0");
+        assert(serial_byte == 8'b10000001, "Symmetric byte reversed");
+        assert(byte_parity == 0, "Even parity for 10000001");
+        assert(word_checksum == (8'h64 ^ 8'h01 ^ 8'hA8 ^ 8'hC0), "Checksum XOR reduction match");
+
+        // 2. Process byte with asymmetric bits: 8'b11110000 (0xF0) -> reversed is 8'b00001111 (0x0F)
+        net_word = 32'h12345678;
+        net_byte = 8'hF0;
+        process_en = 1;
+        step(clk, 1);
+
+        assert(host_word == 32'h78563412, "Host word should be byte-swapped to 0x78563412");
+        assert(serial_byte == 8'h0F, "8'hF0 reversed should equal 8'h0F");
+        assert(byte_parity == 0, "Even parity for 4 set bits");
+        assert(word_checksum == (8'h78 ^ 8'h56 ^ 8'h34 ^ 8'h12), "Checksum XOR of swapped bytes");
+
+        // 3. Process byte with odd parity: 8'b10000000 -> reversed is 8'b00000001, parity is 1
+        net_word = 32'h00000000;
+        net_byte = 8'h80;
+        step(clk, 1);
+
+        assert(host_word == 32'h00000000, "Zero word swap");
+        assert(serial_byte == 8'h01, "8'h80 reversed should equal 8'h01");
+        assert(byte_parity == 1, "Odd parity for 1 set bit");
+
+        // 4. Disable processing: registers should hold previous values
+        process_en = 0;
+        net_byte = 8'hFF;
+        step(clk, 2);
+
+        assert(serial_byte == 8'h01, "Hold register state when process_en=0");
+        assert(byte_parity == 1, "Hold parity state when process_en=0");
+
+        finish();
+    }
+}

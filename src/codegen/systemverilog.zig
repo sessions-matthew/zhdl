@@ -128,19 +128,22 @@ pub const SystemVerilogEmitter = struct {
 
                 const comma = if (is_last) "" else ",";
 
+                const signed_str = if (port.hir_type.is_signed) "signed " else "";
                 if (port.hir_type.tag == .array) {
-                    try writer.print("    {s} logic [{d}:0] {s} [0:{d}]{s}\n", .{
+                    try writer.print("    {s} logic {s}[{d}:0] {s} [0:{d}]{s}\n", .{
                         dir_str,
+                        signed_str,
                         port.hir_type.elem_width - 1,
                         port.name,
                         port.hir_type.array_len - 1,
                         comma,
                     });
                 } else if (port.hir_type.width <= 1) {
-                    try writer.print("    {s} logic       {s}{s}\n", .{ dir_str, port.name, comma });
+                    try writer.print("    {s} logic {s}      {s}{s}\n", .{ dir_str, signed_str, port.name, comma });
                 } else {
-                    try writer.print("    {s} logic [{d:2}:0] {s}{s}\n", .{
+                    try writer.print("    {s} logic {s}[{d:2}:0] {s}{s}\n", .{
                         dir_str,
+                        signed_str,
                         port.hir_type.width - 1,
                         port.name,
                         comma,
@@ -170,19 +173,22 @@ pub const SystemVerilogEmitter = struct {
 
             const comma = if (is_last) "" else ",";
 
+            const signed_str = if (port.hir_type.is_signed) "signed " else "";
             if (port.hir_type.tag == .array) {
-                try writer.print("    {s} logic [{d}:0] {s} [0:{d}]{s}\n", .{
+                try writer.print("    {s} logic {s}[{d}:0] {s} [0:{d}]{s}\n", .{
                     dir_str,
+                    signed_str,
                     port.hir_type.elem_width - 1,
                     port.name,
                     port.hir_type.array_len - 1,
                     comma,
                 });
             } else if (port.hir_type.width <= 1) {
-                try writer.print("    {s} logic       {s}{s}\n", .{ dir_str, port.name, comma });
+                try writer.print("    {s} logic {s}      {s}{s}\n", .{ dir_str, signed_str, port.name, comma });
             } else {
-                try writer.print("    {s} logic [{d:2}:0] {s}{s}\n", .{
+                try writer.print("    {s} logic {s}[{d:2}:0] {s}{s}\n", .{
                     dir_str,
+                    signed_str,
                     port.hir_type.width - 1,
                     port.name,
                     comma,
@@ -196,8 +202,10 @@ pub const SystemVerilogEmitter = struct {
         defer emitted_signals.deinit();
 
         for (mod.registers) |reg| {
+            const signed_str = if (reg.hir_type.is_signed) "signed " else "";
             if (reg.hir_type.tag == .array) {
-                try writer.print("    logic [{d}:0] {s} [0:{d}], {s} [0:{d}];\n", .{
+                try writer.print("    logic {s}[{d}:0] {s} [0:{d}], {s} [0:{d}];\n", .{
+                    signed_str,
                     reg.hir_type.elem_width - 1,
                     reg.q_name,
                     reg.hir_type.array_len - 1,
@@ -207,9 +215,9 @@ pub const SystemVerilogEmitter = struct {
             } else {
                 const w = if (reg.hir_type.width > 0) reg.hir_type.width else 1;
                 if (w <= 1) {
-                    try writer.print("    logic {s}, {s};\n", .{ reg.q_name, reg.d_name });
+                    try writer.print("    logic {s}{s}, {s};\n", .{ signed_str, reg.q_name, reg.d_name });
                 } else {
-                    try writer.print("    logic [{d}:0] {s}, {s};\n", .{ w - 1, reg.q_name, reg.d_name });
+                    try writer.print("    logic {s}[{d}:0] {s}, {s};\n", .{ signed_str, w - 1, reg.q_name, reg.d_name });
                 }
             }
             try emitted_signals.put(reg.q_name, {});
@@ -228,18 +236,19 @@ pub const SystemVerilogEmitter = struct {
             }
             if (is_port) continue;
 
+            const signed_str = if (sig.hir_type.is_signed) "signed " else "";
             if (sig.hir_type.tag == .array) {
-                try writer.print("    logic [{d}:0] ", .{sig.hir_type.elem_width - 1});
+                try writer.print("    logic {s}[{d}:0] ", .{signed_str, sig.hir_type.elem_width - 1});
                 try emitIdent(sig.name, writer);
                 try writer.print(" [0:{d}];\n", .{sig.hir_type.array_len - 1});
             } else {
                 const w = if (sig.hir_type.width > 0) sig.hir_type.width else 1;
                 if (w <= 1) {
-                    try writer.writeAll("    logic ");
+                    try writer.print("    logic {s}", .{signed_str});
                     try emitIdent(sig.name, writer);
                     try writer.writeAll(";\n");
                 } else {
-                    try writer.print("    logic [{d}:0] ", .{w - 1});
+                    try writer.print("    logic {s}[{d}:0] ", .{signed_str, w - 1});
                     try emitIdent(sig.name, writer);
                     try writer.writeAll(";\n");
                 }
@@ -396,12 +405,13 @@ pub const SystemVerilogEmitter = struct {
                     std.mem.indexOf(u8, raw, "'b") != null or
                     std.mem.indexOf(u8, raw, "'B") != null;
 
+                const s_char = if (expr.hir_type.is_signed) "s" else "";
                 if (is_hex) {
-                    try writer.print("{d}'h{x}", .{ w, expr.data.lit.val });
+                    try writer.print("{d}'{s}h{x}", .{ w, s_char, expr.data.lit.val });
                 } else if (is_bin) {
-                    try writer.print("{d}'b{b}", .{ w, expr.data.lit.val });
+                    try writer.print("{d}'{s}b{b}", .{ w, s_char, expr.data.lit.val });
                 } else {
-                    try writer.print("{d}'d{d}", .{ w, expr.data.lit.val });
+                    try writer.print("{d}'{s}d{d}", .{ w, s_char, expr.data.lit.val });
                 }
             },
             .signal_ref => {
@@ -424,7 +434,11 @@ pub const SystemVerilogEmitter = struct {
                     try writer.print("[{d}:{d}]", .{ hi, lo });
                     try writer.writeAll("}}");
                 } else {
-                    if (s.start == 0 and s.target.tag != .signal_ref and s.target.tag != .index and s.target.tag != .member) {
+                    if (s.start == 0 and s.end > s.target.hir_type.width) {
+                        try writer.print("{d}'(", .{s.end});
+                        try self.emitExpr(s.target, writer);
+                        try writer.writeAll(")");
+                    } else if (s.start == 0 and s.target.tag != .signal_ref and s.target.tag != .index and s.target.tag != .member) {
                         try writer.print("{d}'(", .{s.end - s.start});
                         try self.emitExpr(s.target, writer);
                         try writer.writeAll(")");
@@ -556,14 +570,15 @@ pub const SystemVerilogEmitter = struct {
 
         // 1. Emit signals
         for (tb.signals) |sig| {
+            const signed_str = if (sig.hir_type.is_signed) "signed " else "";
             if (sig.hir_type.tag == .array) {
-                try writer.print("    logic [{d}:0] ", .{sig.hir_type.elem_width - 1});
+                try writer.print("    logic {s}[{d}:0] ", .{signed_str, sig.hir_type.elem_width - 1});
                 try emitIdent(sig.name, writer);
                 try writer.print(" [0:{d}];\n", .{sig.hir_type.array_len - 1});
             } else {
                 const w = if (sig.hir_type.width > 0) sig.hir_type.width else 1;
                 if (w <= 1) {
-                    try writer.writeAll("    logic ");
+                    try writer.print("    logic {s}", .{signed_str});
                     try emitIdent(sig.name, writer);
                     if (sig.hir_type.tag == .reset and sig.hir_type.is_active_low) {
                         try writer.writeAll(" = 1;\n");
@@ -571,7 +586,7 @@ pub const SystemVerilogEmitter = struct {
                         try writer.writeAll(" = 0;\n");
                     }
                 } else {
-                    try writer.print("    logic [{d}:0] ", .{w - 1});
+                    try writer.print("    logic {s}[{d}:0] ", .{signed_str, w - 1});
                     try emitIdent(sig.name, writer);
                     try writer.writeAll(" = '0;\n");
                 }
