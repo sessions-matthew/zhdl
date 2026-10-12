@@ -41,20 +41,22 @@ pub module AsyncFifo {
     // Empty condition: write and read Gray pointers match exactly
     empty = (rd_ptr_gray == wr_ptr_gray_sync);
 
-    // Write logic (clocked by wr_clk)
-    if (wr_en and !full) {
-        mem[wr_ptr_bin[2:0]] := wr_data;
-        var next_wr_bin: u4 = wr_ptr_bin +% 1;
-        wr_ptr_bin := next_wr_bin;
-        wr_ptr_gray := next_wr_bin ^ (next_wr_bin >> 1);
-    }
+    comb {
+        // Write logic (clocked by wr_clk)
+        if (wr_en and !full) {
+            mem[wr_ptr_bin[2:0]] := wr_data;
+            var next_wr_bin: u4 = wr_ptr_bin +% 1;
+            wr_ptr_bin := next_wr_bin;
+            wr_ptr_gray := next_wr_bin ^ (next_wr_bin >> 1);
+        }
 
-    // Read logic
-    rd_data = mem[rd_ptr_bin[2:0]];
-    if (rd_en and !empty) {
-        var next_rd_bin: u4 = rd_ptr_bin +% 1;
-        rd_ptr_bin := next_rd_bin;
-        rd_ptr_gray := next_rd_bin ^ (next_rd_bin >> 1);
+        // Read logic
+        rd_data = mem[rd_ptr_bin[2:0]];
+        if (rd_en and !empty) {
+            var next_rd_bin: u4 = rd_ptr_bin +% 1;
+            rd_ptr_bin := next_rd_bin;
+            rd_ptr_gray := next_rd_bin ^ (next_rd_bin >> 1);
+        }
     }
 }
 

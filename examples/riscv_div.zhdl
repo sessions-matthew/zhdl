@@ -1,0 +1,223 @@
+// RISC-V RV32M Hardware Integer Divider & Remainder Coprocessor
+// Ported from YosysHQ's PicoRV32 (picorv32_pcpi_div)
+//
+// Features:
+// - Implements RISC-V M-extension DIV, DIVU, REM, REMU instructions
+// - PicoRV32 PCPI (Pico Co-Processor Interface) standard handshaking
+// - 32-step binary restoring division algorithm
+// - Full compliance with RISC-V unprivileged ISA specification (div-by-zero & signed overflow)
+
+pub module RiscvDiv {
+    in clk: clock,
+    in resetn: reset(.low),
+
+    in pcpi_valid: u1,
+    in pcpi_insn: u32,
+    in pcpi_rs1: u32,
+    in pcpi_rs2: u32,
+
+    out pcpi_wr: u1,
+    out pcpi_rd: u32,
+    out pcpi_wait: u1,
+    out pcpi_ready: u1,
+
+    // Instruction decode registers
+    reg(clk, resetn) instr_div: u1 = 0;
+    reg(clk, resetn) instr_divu: u1 = 0;
+    reg(clk, resetn) instr_rem: u1 = 0;
+    reg(clk, resetn) instr_remu: u1 = 0;
+
+    reg(clk, resetn) pcpi_wait_reg: u1 = 0;
+    reg(clk, resetn) pcpi_wait_q: u1 = 0;
+
+    // Execution engine registers
+    reg(clk, resetn) dividend: u32 = 0;
+    reg(clk, resetn) divisor: u63 = 0;
+    reg(clk, resetn) quotient: u32 = 0;
+    reg(clk, resetn) quotient_msk: u32 = 0;
+    reg(clk, resetn) running: u1 = 0;
+    reg(clk, resetn) outsign: u1 = 0;
+    reg(clk, resetn) is_div_reg: u1 = 0;
+
+    reg(clk, resetn) pcpi_ready_reg: u1 = 0;
+    reg(clk, resetn) pcpi_wr_reg: u1 = 0;
+    reg(clk, resetn) pcpi_rd_reg: u32 = 0;
+
+    comb {
+        pcpi_wait = pcpi_wait_reg;
+        pcpi_ready = pcpi_ready_reg;
+        pcpi_wr = pcpi_wr_reg;
+        pcpi_rd = pcpi_rd_reg;
+
+        // Default register updates
+        instr_div := 0;
+        instr_divu := 0;
+        instr_rem := 0;
+        instr_remu := 0;
+
+        // Instruction decode logic
+        if (pcpi_valid != 0 and pcpi_ready_reg == 0 and pcpi_insn[0..7] == 7'b0110011 and pcpi_insn[25..32] == 7'b0000001) {
+            switch (pcpi_insn[12..15]) {
+                3'b100 => instr_div := 1,
+                3'b101 => instr_divu := 1,
+                3'b110 => instr_rem := 1,
+                3'b111 => instr_remu := 1,
+                else => {},
+            }
+        }
+
+        const instr_any = instr_div or instr_divu or instr_rem or instr_remu;
+        pcpi_wait_reg := instr_any;
+        pcpi_wait_q := pcpi_wait_reg;
+
+        const start = pcpi_wait_reg and !pcpi_wait_q;
+
+        // Divider FSM & datapath
+        pcpi_ready_reg := 0;
+        pcpi_wr_reg := 0;
+        pcpi_rd_reg := pcpi_rd_reg;
+        running := running;
+        dividend := dividend;
+        divisor := divisor;
+        quotient := quotient;
+        quotient_msk := quotient_msk;
+        outsign := outsign;
+        is_div_reg := is_div_reg;
+
+        if (start != 0) {
+            running := 1;
+
+            const is_signed = (instr_div or instr_rem);
+            const rs1_neg = is_signed and (pcpi_rs1[31] != 0);
+            const rs2_neg = is_signed and (pcpi_rs2[31] != 0);
+
+            const abs_rs1 = if (rs1_neg) -pcpi_rs1 else pcpi_rs1;
+            const abs_rs2 = if (rs2_neg) -pcpi_rs2 else pcpi_rs2;
+
+            dividend := abs_rs1;
+            divisor := @as(u63, abs_rs2) << 31;
+            outsign := (instr_div and (pcpi_rs1[31] != pcpi_rs2[31]) and (pcpi_rs2 != 0)) or (instr_rem and (pcpi_rs1[31] != 0));
+            is_div_reg := instr_div or instr_divu;
+            quotient := 0;
+            quotient_msk := @as(u32, 1) << 31;
+        } else if (quotient_msk == 0 and running != 0) {
+            running := 0;
+            pcpi_ready_reg := 1;
+            pcpi_wr_reg := 1;
+
+            if (is_div_reg != 0) {
+                pcpi_rd_reg := if (outsign != 0) -quotient else quotient;
+            } else {
+                pcpi_rd_reg := if (outsign != 0) -dividend else dividend;
+            }
+        } else if (running != 0) {
+            if (divisor <= @as(u63, dividend)) {
+                dividend := dividend - @as(u32, divisor[0..32]);
+                quotient := quotient | quotient_msk;
+            }
+            divisor := divisor >> 1;
+            quotient_msk := quotient_msk >> 1;
+        }
+    }
+}
+
+test "RiscvDivTb" {
+    wire clk: clock;
+    wire resetn: reset(.low);
+
+    wire pcpi_valid: u1 = 0;
+    wire pcpi_insn: u32 = 0;
+    wire pcpi_rs1: u32 = 0;
+    wire pcpi_rs2: u32 = 0;
+
+    wire pcpi_wr: u1;
+    wire pcpi_rd: u32;
+    wire pcpi_wait: u1;
+    wire pcpi_ready: u1;
+
+    const dut = RiscvDiv.instantiate(.{
+        .clk = clk,
+        .resetn = resetn,
+        .pcpi_valid = pcpi_valid,
+        .pcpi_insn = pcpi_insn,
+        .pcpi_rs1 = pcpi_rs1,
+        .pcpi_rs2 = pcpi_rs2,
+        .pcpi_wr = pcpi_wr,
+        .pcpi_rd = pcpi_rd,
+        .pcpi_wait = pcpi_wait,
+        .pcpi_ready = pcpi_ready,
+    });
+
+    sim {
+        clk.generate(100MHz);
+        resetn.pulse(5);
+        clk.step(5);
+
+        // Test 1: DIVU 100 / 7 = 14 (0x0E)
+        // Opcode 0x33, funct7 0x01, funct3 0x5 (DIVU)
+        pcpi_insn = 32'h0270d533; // divu a0, a1, a2 (rd=10, rs1=1, rs2=2)
+        pcpi_rs1 = 100;
+        pcpi_rs2 = 7;
+        pcpi_valid = 1;
+
+        // Step until ready asserted
+        clk.step(2);
+        pcpi_valid = 0;
+        clk.step(34);
+
+        assert(pcpi_ready == 1, "Expected pcpi_ready for DIVU");
+        assert(pcpi_rd == 14, "Expected 100 / 7 == 14");
+
+        // Test 2: REMU 100 % 7 = 2
+        clk.step(2);
+        pcpi_insn = 32'h0270f533; // remu a0, a1, a2 (funct3 = 0x7)
+        pcpi_rs1 = 100;
+        pcpi_rs2 = 7;
+        pcpi_valid = 1;
+        clk.step(2);
+        pcpi_valid = 0;
+        clk.step(34);
+
+        assert(pcpi_ready == 1, "Expected pcpi_ready for REMU");
+        assert(pcpi_rd == 2, "Expected 100 % 7 == 2");
+
+        // Test 3: Signed DIV -100 / 7 = -14 (0xFFFFFFF2)
+        clk.step(2);
+        pcpi_insn = 32'h0270c533; // div a0, a1, a2 (funct3 = 0x4)
+        pcpi_rs1 = @as(u32, -100);
+        pcpi_rs2 = 7;
+        pcpi_valid = 1;
+        clk.step(2);
+        pcpi_valid = 0;
+        clk.step(34);
+
+        assert(pcpi_ready == 1, "Expected pcpi_ready for signed DIV");
+        assert(pcpi_rd == @as(u32, -14), "Expected -100 / 7 == -14");
+
+        // Test 4: Signed REM -100 % 7 = -2 (0xFFFFFFFE)
+        clk.step(2);
+        pcpi_insn = 32'h0270e533; // rem a0, a1, a2 (funct3 = 0x6)
+        pcpi_rs1 = @as(u32, -100);
+        pcpi_rs2 = 7;
+        pcpi_valid = 1;
+        clk.step(2);
+        pcpi_valid = 0;
+        clk.step(34);
+
+        assert(pcpi_ready == 1, "Expected pcpi_ready for signed REM");
+        assert(pcpi_rd == @as(u32, -2), "Expected -100 % 7 == -2");
+
+        // Test 5: Division by zero DIVU 42 / 0 = 0xFFFFFFFF
+        clk.step(2);
+        pcpi_insn = 32'h0270d533; // divu
+        pcpi_rs1 = 42;
+        pcpi_rs2 = 0;
+        pcpi_valid = 1;
+        clk.step(2);
+        pcpi_valid = 0;
+        clk.step(34);
+
+        assert(pcpi_ready == 1, "Expected pcpi_ready for DIVU by zero");
+        assert(pcpi_rd == 32'hffffffff, "Expected 42 / 0 == 0xFFFFFFFF");
+    }
+}

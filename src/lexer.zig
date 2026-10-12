@@ -115,12 +115,18 @@ pub const Lexer = struct {
                 if (self.match('%')) {
                     return .{ .tag = .plus_percent, .loc = start_loc, .slice = "+%" };
                 }
+                if (self.match(':')) {
+                    return .{ .tag = .plus_colon, .loc = start_loc, .slice = "+:" };
+                }
                 return .{ .tag = .plus, .loc = start_loc, .slice = "+" };
             },
 
             '-' => {
                 if (self.match('%')) {
                     return .{ .tag = .minus_percent, .loc = start_loc, .slice = "-%" };
+                }
+                if (self.match(':')) {
+                    return .{ .tag = .minus_colon, .loc = start_loc, .slice = "-:" };
                 }
                 return .{ .tag = .minus, .loc = start_loc, .slice = "-" };
             },

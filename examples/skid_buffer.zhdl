@@ -21,40 +21,42 @@ pub module SkidBuffer(comptime W: usize) {
     reg buf_data: ?u(W) = null;
     reg skid_data: ?u(W) = null;
 
-    if (skid_data != null) {
-        // Buffer is full (2 items stored) -> Upstream must stall
-        s_ready = 0;
-        m_data = buf_data;
+    comb {
+        if (skid_data != null) {
+            // Buffer is full (2 items stored) -> Upstream must stall
+            s_ready = 0;
+            m_data = buf_data;
 
-        if (m_ready) {
-            // Downstream consumed buf_data; advance skid_data into buf_data
-            buf_data := skid_data;
-            skid_data := null;
-        }
-    } else if (buf_data != null) {
-        // Buffer has 1 item -> Upstream may continue producing
-        s_ready = 1;
-        m_data = buf_data;
+            if (m_ready) {
+                // Downstream consumed buf_data; advance skid_data into buf_data
+                buf_data := skid_data;
+                skid_data := null;
+            }
+        } else if (buf_data != null) {
+            // Buffer has 1 item -> Upstream may continue producing
+            s_ready = 1;
+            m_data = buf_data;
 
-        if (m_ready) {
-            if (s_data != null) {
-                buf_data := s_data;
+            if (m_ready) {
+                if (s_data != null) {
+                    buf_data := s_data;
+                } else {
+                    buf_data := null;
+                }
             } else {
-                buf_data := null;
+                // Downstream stalled; if upstream presents data, absorb it into skid_data
+                if (s_data != null) {
+                    skid_data := s_data;
+                }
             }
         } else {
-            // Downstream stalled; if upstream presents data, absorb it into skid_data
-            if (s_data != null) {
-                skid_data := s_data;
-            }
-        }
-    } else {
-        // Buffer is empty
-        s_ready = 1;
-        m_data = null;
+            // Buffer is empty
+            s_ready = 1;
+            m_data = null;
 
-        if (s_data != null) {
-            buf_data := s_data;
+            if (s_data != null) {
+                buf_data := s_data;
+            }
         }
     }
 }

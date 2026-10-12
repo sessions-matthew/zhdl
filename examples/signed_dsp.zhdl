@@ -38,18 +38,20 @@ pub module SignedDspMac {
     wire pos_overflow: u1 = (next_sum > 30000);
     wire neg_overflow: u1 = (next_sum < -30000);
 
-    if (clear) {
-        r_acc := 0;
-        r_sat := 0;
-    } else if (pos_overflow) {
-        r_acc := 30000;
-        r_sat := 1;
-    } else if (neg_overflow) {
-        r_acc := -30000;
-        r_sat := 1;
-    } else {
-        r_acc := @truncate(i16, next_sum);
-        r_sat := 0;
+    comb {
+        if (clear) {
+            r_acc := 0;
+            r_sat := 0;
+        } else if (pos_overflow) {
+            r_acc := 30000;
+            r_sat := 1;
+        } else if (neg_overflow) {
+            r_acc := -30000;
+            r_sat := 1;
+        } else {
+            r_acc := @truncate(i16, next_sum);
+            r_sat := 0;
+        }
     }
 
     product = prod32;

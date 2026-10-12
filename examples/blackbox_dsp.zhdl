@@ -38,11 +38,13 @@ pub module DspMac {
         },
     );
 
-    if (clear) {
-        accum_q := 0;
-    } else {
-        // Accumulate 43-bit product zero-extended to 48-bit accumulator
-        accum_q := accum_q +% @as(u48, mult_result);
+    comb {
+        if (clear) {
+            accum_q := 0;
+        } else {
+            // Accumulate 43-bit product zero-extended to 48-bit accumulator
+            accum_q := accum_q +% @as(u48, mult_result);
+        }
     }
 
     accum = accum_q;

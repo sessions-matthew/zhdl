@@ -76,7 +76,9 @@ pub module UartBridge {
     reg fifo_count: u7 = 0;
 
     wire expected_crc: u16;
-    expected_crc = 0;
+
+    comb {
+        expected_crc = 0;
 
         // Output wiring
         host_rx_fifo_count = @concat(@as(u1, 0), fifo_count);
@@ -166,6 +168,7 @@ pub module UartBridge {
             }
         }
     }
+}
 
 test "UartBridge framing, CRC16 verification, and host injection FIFO" {
     wire clk: clock;

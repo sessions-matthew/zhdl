@@ -61,20 +61,24 @@ pub module NetworkPacketEngine {
 
     // 3. Compile-time loop unrolling to unpack 32-bit word into byte array
     wire unpacked_bytes: [4]u8;
-    inline for (0..4) |i| {
-        unpacked_bytes[i] = swapped_word[i * 8 .. i * 8 + 8];
-    }
-
     // 4. Parity and XOR reduction across unpacked bytes
     wire par: u1 = net_byte[0] ^ net_byte[1] ^ net_byte[2] ^ net_byte[3] ^
                    net_byte[4] ^ net_byte[5] ^ net_byte[6] ^ net_byte[7];
-    wire xor_sum: u8 = unpacked_bytes[0] ^ unpacked_bytes[1] ^ unpacked_bytes[2] ^ unpacked_bytes[3];
+    wire xor_sum: u8;
 
-    if (process_en) {
-        r_host_word := swapped_word;
-        r_serial_byte := reversed_byte;
-        r_parity := par;
-        r_checksum := xor_sum;
+    comb {
+        inline for (0..4) |i| {
+            unpacked_bytes[i] = swapped_word[i * 8 .. i * 8 + 8];
+        }
+
+        xor_sum = unpacked_bytes[0] ^ unpacked_bytes[1] ^ unpacked_bytes[2] ^ unpacked_bytes[3];
+
+        if (process_en) {
+            r_host_word := swapped_word;
+            r_serial_byte := reversed_byte;
+            r_parity := par;
+            r_checksum := xor_sum;
+        }
     }
 
     host_word = r_host_word;

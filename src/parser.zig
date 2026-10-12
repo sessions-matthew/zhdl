@@ -303,7 +303,7 @@ pub const Parser = struct {
                 name_str = name_str[1 .. name_str.len - 1];
             }
 
-            const test_items = try self.parseModuleBody(alloc);
+            const test_items = try self.parseTestBody(alloc);
             _ = self.match(.semicolon);
             return .{
                 .tag = .test_decl,
@@ -446,6 +446,14 @@ pub const Parser = struct {
     }
 
     fn parseModuleBody(self: *Parser, alloc: std.mem.Allocator) ![]ast.ModuleItem {
+        return self.parseModuleBodyInternal(alloc, false);
+    }
+
+    fn parseTestBody(self: *Parser, alloc: std.mem.Allocator) ![]ast.ModuleItem {
+        return self.parseModuleBodyInternal(alloc, true);
+    }
+
+    fn parseModuleBodyInternal(self: *Parser, alloc: std.mem.Allocator, is_test: bool) ![]ast.ModuleItem {
         _ = try self.expect(.l_brace);
         var items = ArrayList(ast.ModuleItem).init(alloc);
 
@@ -751,32 +759,23 @@ pub const Parser = struct {
                     },
                 });
             } else if (self.match(.kw_sync)) {
-                _ = try self.expect(.l_paren);
-                const clk_expr = try self.parseExpr(alloc);
-                var rst_expr: ?*ast.Expr = null;
-                if (self.match(.comma)) {
-                    rst_expr = try self.parseExpr(alloc);
-                }
-                _ = try self.expect(.r_paren);
-
-                _ = try self.expect(.l_brace);
-                var stmts = ArrayList(ast.Statement).init(alloc);
-                while (!self.check(.r_brace) and !self.check(.eof)) {
-                    try stmts.append(try self.parseStatement(alloc));
-                }
-                _ = try self.expect(.r_brace);
-
-                try items.append(.{
-                    .tag = .sync_block,
-                    .loc = item_loc,
-                    .data = .{
-                        .sync_block = .{
-                            .clk = clk_expr,
-                            .rst = rst_expr,
-                            .stmts = try stmts.toOwnedSlice(),
-                        },
-                    },
-                });
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: Deprecated 'sync' Block
+                    \\======================================================================
+                    \\'sync' blocks are deprecated.
+                    \\In ZHdl, clocks and resets are bound exclusively at the register declaration:
+                    \\    reg(clk, rst) count: u8 = 0;
+                    \\
+                    \\All next-state logic is computed inside 'comb' using ':=':
+                    \\    comb {{
+                    \\        count := count +% 1;
+                    \\    }}
+                    \\======================================================================
+                    \\
+                    , .{});
+                return error.UnexpectedToken;
             } else if (self.match(.kw_sim)) {
                 _ = try self.expect(.l_brace);
                 var stmts = ArrayList(ast.Statement).init(alloc);
@@ -795,24 +794,62 @@ pub const Parser = struct {
                         },
                     },
                 });
-            } else if (self.check(.l_brace)) {
-                _ = try self.expect(.l_brace);
-                var stmts = ArrayList(ast.Statement).init(alloc);
-                while (!self.check(.r_brace) and !self.check(.eof)) {
-                    try stmts.append(try self.parseStatement(alloc));
-                }
-                _ = try self.expect(.r_brace);
-                try items.append(.{
-                    .tag = .comb_block,
-                    .loc = item_loc,
-                    .data = .{
-                        .comb_block = .{
-                            .stmts = try stmts.toOwnedSlice(),
-                        },
-                    },
-                });
+            } else if (!is_test and self.check(.l_brace)) {
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: Anonymous Block at Module Scope
+                    \\======================================================================
+                    \\Bare anonymous '{{ ... }}' blocks are not permitted at module scope.
+                    \\All procedural combinational logic must be enclosed in an explicit 'comb' block:
+                    \\
+                    \\Fix:
+                    \\  comb {{
+                    \\      ...
+                    \\  }}
+                    \\======================================================================
+                    \\
+                    , .{});
+                return error.UnexpectedToken;
+            } else if (!is_test and (self.check(.kw_if) or self.check(.kw_switch) or self.check(.kw_for) or self.check(.kw_inline))) {
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: Procedural Statement at Module Scope
+                    \\======================================================================
+                    \\Control-flow statements ('{s}') are not permitted at module scope.
+                    \\Module root is strictly declarative.
+                    \\
+                    \\Fix:
+                    \\  Enclose procedural combinational logic in an explicit 'comb' block:
+                    \\    comb {{
+                    \\        {s} ...
+                    \\    }}
+                    \\======================================================================
+                    \\
+                    , .{ self.current.slice, self.current.slice });
+                return error.UnexpectedToken;
             } else {
                 const stmt = try self.parseStatement(alloc);
+                if (!is_test and stmt.tag == .assign and stmt.data.assign.is_reg_assign) {
+                    std.debug.print(
+                        \\
+                        \\======================================================================
+                        \\COMPILE ERROR: Procedural Register Assignment at Module Scope
+                        \\======================================================================
+                        \\Register assignment (':=') is not permitted at module scope.
+                        \\Module root is strictly declarative.
+                        \\
+                        \\Fix:
+                        \\  Enclose register updates in an explicit 'comb' block:
+                        \\    comb {{
+                        \\        ... := ...;
+                        \\    }}
+                        \\======================================================================
+                        \\
+                        , .{});
+                    return error.UnexpectedToken;
+                }
                 try items.append(.{
                     .tag = .stmt,
                     .loc = item_loc,
@@ -845,7 +882,7 @@ pub const Parser = struct {
     fn parseStatement(self: *Parser, alloc: std.mem.Allocator) ParseError!ast.Statement {
         const stmt_loc = self.current.loc;
 
-        if (self.match(.kw_var) or self.match(.kw_wire)) {
+        if (self.match(.kw_var) or self.match(.kw_wire) or self.match(.kw_const)) {
             const name_tok = try self.expect(.identifier);
             var type_annot: ?*ast.Type = null;
             if (self.match(.colon)) {
@@ -1675,7 +1712,7 @@ pub const Parser = struct {
     }
 
     fn parseUnary(self: *Parser, alloc: std.mem.Allocator) ParseError!*ast.Expr {
-        if (self.check(.bang) or self.check(.tilde) or self.check(.minus)) {
+        if (self.check(.bang) or self.check(.tilde) or self.check(.minus) or self.check(.pipe) or self.check(.ampersand) or self.check(.caret)) {
             const op = self.current.tag;
             const op_loc = self.current.loc;
             self.advance();
@@ -1715,9 +1752,43 @@ pub const Parser = struct {
                 };
                 expr = e;
             } else if (self.match(.l_bracket)) {
-                // Slicing: [start..end] or [high..low] (sugar for reversed slice!) or indexing: [i]
+                // Slicing: [start..end], [base +: width], [base -: width], or indexing: [i]
                 const start_expr = try self.parseExpr(alloc);
-                if (self.match(.dot_dot)) {
+                if (self.match(.plus_colon)) {
+                    const width_expr = try self.parseExpr(alloc);
+                    _ = try self.expect(.r_bracket);
+                    const e = try alloc.create(ast.Expr);
+                    e.* = .{
+                        .tag = .part_select,
+                        .loc = start_expr.loc,
+                        .data = .{
+                            .part_select = .{
+                                .target = expr,
+                                .base = start_expr,
+                                .width = width_expr,
+                                .is_up = true,
+                            },
+                        },
+                    };
+                    expr = e;
+                } else if (self.match(.minus_colon)) {
+                    const width_expr = try self.parseExpr(alloc);
+                    _ = try self.expect(.r_bracket);
+                    const e = try alloc.create(ast.Expr);
+                    e.* = .{
+                        .tag = .part_select,
+                        .loc = start_expr.loc,
+                        .data = .{
+                            .part_select = .{
+                                .target = expr,
+                                .base = start_expr,
+                                .width = width_expr,
+                                .is_up = false,
+                            },
+                        },
+                    };
+                    expr = e;
+                } else if (self.match(.dot_dot)) {
                     const end_expr = try self.parseExpr(alloc);
                     _ = try self.expect(.r_bracket);
 
@@ -1989,25 +2060,59 @@ pub const Parser = struct {
             return e;
         }
 
-        // Enum literal: .idle, .read, etc.
+        // Enum literal: .idle, .read, etc. or Anonymous struct/array init: .{ ... }
         if (self.match(.dot)) {
             if (self.check(.l_brace)) {
-                // Anonymous struct init: .{ .a = 1, .b = 2 }
+                // Anonymous struct init: .{ .a = 1, .b = 2 } or array init: .{ 1, 2, 3 }
                 self.advance();
-                const fields = try self.parseStructInitFields(alloc);
-
-                const e = try alloc.create(ast.Expr);
-                e.* = .{
-                    .tag = .struct_init,
-                    .loc = loc,
-                    .data = .{
-                        .struct_init = .{
-                            .type_expr = null,
-                            .fields = fields,
+                if (self.check(.r_brace)) {
+                    _ = try self.expect(.r_brace);
+                    const e = try alloc.create(ast.Expr);
+                    e.* = .{
+                        .tag = .array_init,
+                        .loc = loc,
+                        .data = .{
+                            .array_init = .{
+                                .type_expr = null,
+                                .elements = &.{},
+                            },
                         },
-                    },
-                };
-                return e;
+                    };
+                    return e;
+                } else if (self.check(.dot)) {
+                    const fields = try self.parseStructInitFields(alloc);
+                    const e = try alloc.create(ast.Expr);
+                    e.* = .{
+                        .tag = .struct_init,
+                        .loc = loc,
+                        .data = .{
+                            .struct_init = .{
+                                .type_expr = null,
+                                .fields = fields,
+                            },
+                        },
+                    };
+                    return e;
+                } else {
+                    var elements = ArrayList(*ast.Expr).init(alloc);
+                    while (!self.check(.r_brace) and !self.check(.eof)) {
+                        try elements.append(try self.parseExpr(alloc));
+                        if (!self.match(.comma)) break;
+                    }
+                    _ = try self.expect(.r_brace);
+                    const e = try alloc.create(ast.Expr);
+                    e.* = .{
+                        .tag = .array_init,
+                        .loc = loc,
+                        .data = .{
+                            .array_init = .{
+                                .type_expr = null,
+                                .elements = try elements.toOwnedSlice(),
+                            },
+                        },
+                    };
+                    return e;
+                }
             }
 
             const field = try self.expect(.identifier);
@@ -2131,6 +2236,41 @@ pub const Parser = struct {
             return e;
         }
 
+        // Array type or typed array init: [4]u8{ 1, 2, 3, 4 } or [4]u8
+        if (self.check(.l_bracket)) {
+            const t = try self.parseType(alloc);
+            if (self.match(.l_brace)) {
+                var elements = ArrayList(*ast.Expr).init(alloc);
+                while (!self.check(.r_brace) and !self.check(.eof)) {
+                    try elements.append(try self.parseExpr(alloc));
+                    if (!self.match(.comma)) break;
+                }
+                _ = try self.expect(.r_brace);
+                const e = try alloc.create(ast.Expr);
+                e.* = .{
+                    .tag = .array_init,
+                    .loc = loc,
+                    .data = .{
+                        .array_init = .{
+                            .type_expr = t,
+                            .elements = try elements.toOwnedSlice(),
+                        },
+                    },
+                };
+                return e;
+            } else {
+                const e = try alloc.create(ast.Expr);
+                e.* = .{
+                    .tag = .type_expr,
+                    .loc = loc,
+                    .data = .{
+                        .type_expr = t,
+                    },
+                };
+                return e;
+            }
+        }
+
         // Type expressions: ?T, packed struct { ... } or enum { ... } or union(...) { ... } or struct { ... }
         if (self.check(.question_mark) or self.check(.kw_packed) or self.check(.kw_enum) or self.check(.kw_union) or self.check(.kw_struct)) {
             const t = try self.parseType(alloc);
@@ -2200,6 +2340,11 @@ pub const Parser = struct {
         return switch (tag) {
             .builtin_import,
             .builtin_concat,
+            .builtin_replicate,
+            .builtin_reduce_or,
+            .builtin_reduce_and,
+            .builtin_reduce_xor,
+            .builtin_part_select,
             .builtin_bit_reverse,
             .builtin_byte_swap,
             .builtin_truncate,

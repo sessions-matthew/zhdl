@@ -29,33 +29,35 @@ pub module WatchdogTimer {
     reg r_reset_out: u1 = 0;
     reg r_expired: u1 = 0;
 
-    if (!enable) {
-        r_count := reload_val;
-        r_warn_irq := 0;
-        r_reset_out := 0;
-        r_expired := 0;
-    } else if (pet) {
-        r_count := reload_val;
-        r_warn_irq := 0;
-        r_reset_out := 0;
-        r_expired := 0;
-    } else if (r_count == 0) {
-        // Watchdog timed out! Assert reset trigger and latch expired flag
-        r_count := 0;
-        r_warn_irq := 1;
-        r_reset_out := 1;
-        r_expired := 1;
-    } else {
-        // Decrement countdown
-        wire next_count: u16 = r_count -% 1;
-        r_count := next_count;
-        r_reset_out := 0;
-
-        // Trigger early warning interrupt if below or at threshold
-        if (warn_threshold > 0 and next_count <= warn_threshold) {
-            r_warn_irq := 1;
-        } else {
+    comb {
+        if (!enable) {
+            r_count := reload_val;
             r_warn_irq := 0;
+            r_reset_out := 0;
+            r_expired := 0;
+        } else if (pet) {
+            r_count := reload_val;
+            r_warn_irq := 0;
+            r_reset_out := 0;
+            r_expired := 0;
+        } else if (r_count == 0) {
+            // Watchdog timed out! Assert reset trigger and latch expired flag
+            r_count := 0;
+            r_warn_irq := 1;
+            r_reset_out := 1;
+            r_expired := 1;
+        } else {
+            // Decrement countdown
+            wire next_count: u16 = r_count -% 1;
+            r_count := next_count;
+            r_reset_out := 0;
+
+            // Trigger early warning interrupt if below or at threshold
+            if (warn_threshold > 0 and next_count <= warn_threshold) {
+                r_warn_irq := 1;
+            } else {
+                r_warn_irq := 0;
+            }
         }
     }
 

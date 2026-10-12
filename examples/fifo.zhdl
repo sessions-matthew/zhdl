@@ -1,117 +1,200 @@
-//! Synchronous FIFO with Submodule Hierarchy and Full/Empty Flag Generation
+// ==============================================================================
+// AXI4-Stream Synchronous FIFO in ZHdl
+// Ported & adapted from Alex Forencich's verilog-i2c axis_fifo.v
+//
+// Demonstrates:
+// - Circular pointer FIFO full/empty detection (MSB phase bit comparison)
+// - Synchronous dual-port RAM array: reg mem: [8]u8 = 0
+// - Dynamic indexing on both write (mem[wr_addr].next = data) and read (mem[rd_addr])
+// - AXI4-Stream standard valid/ready handshaking
+// - Verification testbench with burst writing, full detection, burst draining,
+//   and simultaneous read/write single-cycle throughput
+// ==============================================================================
 
-pub module FifoPointer {
+pub module AxisFifo {
     in clk: clock,
     in rst: reset,
-    in inc: u1,
-    out ptr: u4,
 
-    reg r_ptr: u4 = 0;
+    // AXI-Stream Slave (Input)
+    in s_axis_tdata: u8,
+    in s_axis_tvalid: u1,
+    out s_axis_tready: u1,
 
-    if (inc) {
-        r_ptr := r_ptr +% 1;
-    }
-    ptr = r_ptr;
-}
+    // AXI-Stream Master (Output)
+    out m_axis_tdata: u8,
+    out m_axis_tvalid: u1,
+    in m_axis_tready: u1,
 
-pub module SyncFifo {
-    in clk: clock,
-    in rst: reset,
-    in wr_en: u1,
-    in rd_en: u1,
-    in din: u8,
-    out dout: u8,
-    out empty: u1,
+    // Status flags
     out full: u1,
-    out wr_ptr: u4,
-    out rd_ptr: u4,
+    out empty: u1,
+    out count: u4,
 
-    // Submodule instantiation with named port binding
-    const wr_unit = FifoPointer.instantiate(.{
-        .clk = clk,
-        .rst = rst,
-        .inc = wr_en,
-        .ptr = wr_ptr,
-    });
+    // Depth = 8 words -> 3-bit address [0..3], 4-bit pointer [0..4]
+    reg(clk, rst) wr_ptr: u4 = 0;
+    reg(clk, rst) rd_ptr: u4 = 0;
+    reg(clk, rst) mem: [8]u8 = 0;
 
-    const rd_unit = FifoPointer.instantiate(.{
-        .clk = clk,
-        .rst = rst,
-        .inc = rd_en,
-        .ptr = rd_ptr,
-    });
+    comb {
+        wire wr_addr: u3 = wr_ptr[0..3];
+        wire rd_addr: u3 = rd_ptr[0..3];
 
-    reg count_reg: u5 = 0;
+        // Full condition: MSBs differ, but lower address bits match
+        full = (wr_ptr[3] != rd_ptr[3]) and (wr_addr == rd_addr);
+        // Empty condition: write and read pointers match exactly
+        empty = wr_ptr == rd_ptr;
+        // Occupancy count: 0 to 8
+        count = wr_ptr - rd_ptr;
 
-    empty = (count_reg == 0);
-    full  = (count_reg == 16);
+        s_axis_tready = !full;
+        m_axis_tvalid = !empty;
+        m_axis_tdata = mem[rd_addr];
 
-    if (wr_en && !rd_en) {
-        count_reg := count_reg +% 1;
-    } else if (!wr_en && rd_en) {
-        count_reg := count_reg -% 1;
+        wire write_en: u1 = s_axis_tvalid and s_axis_tready;
+        wire read_en: u1 = m_axis_tvalid and m_axis_tready;
+
+        if (write_en == 1) {
+            mem[wr_addr] := s_axis_tdata;
+            wr_ptr := wr_ptr + 1;
+        }
+
+        if (read_en == 1) {
+            rd_ptr := rd_ptr + 1;
+        }
     }
-
-    dout = din;
 }
 
-test "SyncFifo write, read, full, and empty flags" {
+test "AxisFifo burst push, full, burst pop, and concurrent streaming testbench" {
     wire clk: clock;
     wire rst: reset;
-    wire wr_en: u1;
-    wire rd_en: u1;
-    wire din: u8;
-    wire dout: u8;
-    wire empty: u1;
-    wire full: u1;
-    wire wr_ptr: u4;
-    wire rd_ptr: u4;
 
-    const dut = SyncFifo.instantiate(.{
+    wire s_axis_tdata: u8 = 0;
+    wire s_axis_tvalid: u1 = 0;
+    wire s_axis_tready: u1;
+
+    wire m_axis_tdata: u8;
+    wire m_axis_tvalid: u1;
+    wire m_axis_tready: u1 = 0;
+
+    wire full: u1;
+    wire empty: u1;
+    wire count: u4;
+
+    const uut = AxisFifo.instantiate(.{
         .clk = clk,
         .rst = rst,
-        .wr_en = wr_en,
-        .rd_en = rd_en,
-        .din = din,
-        .dout = dout,
-        .empty = empty,
+        .s_axis_tdata = s_axis_tdata,
+        .s_axis_tvalid = s_axis_tvalid,
+        .s_axis_tready = s_axis_tready,
+        .m_axis_tdata = m_axis_tdata,
+        .m_axis_tvalid = m_axis_tvalid,
+        .m_axis_tready = m_axis_tready,
         .full = full,
-        .wr_ptr = wr_ptr,
-        .rd_ptr = rd_ptr,
+        .empty = empty,
+        .count = count,
     });
 
     clk.generate(100MHz);
-    trace("fifo_tb.vcd");
-
     rst.pulse(2);
+
+    // Initial state after reset
     assert(empty == 1, "FIFO should be empty after reset");
     assert(full == 0, "FIFO should not be full after reset");
-    assert(wr_ptr == 0, "wr_ptr should be 0 out of reset");
-    assert(rd_ptr == 0, "rd_ptr should be 0 out of reset");
+    assert(count == 0, "Count should be 0 after reset");
+    assert(s_axis_tready == 1, "s_axis_tready should be asserted when not full");
+    assert(m_axis_tvalid == 0, "m_axis_tvalid should be deasserted when empty");
 
-    // Write 1 byte
-    wr_en = 1;
-    din = 0x42;
+    // Push 1st byte: 0xA1
+    s_axis_tdata = 8'hA1;
+    s_axis_tvalid = 1;
     clk.step(1);
-    wr_en = 0;
-    assert(empty == 0, "FIFO should not be empty after write");
-    assert(wr_ptr == 1, "wr_ptr should advance to 1");
+    assert(count == 1, "Count should be 1 after 1st push");
+    assert(empty == 0, "FIFO should not be empty after push");
+    assert(m_axis_tvalid == 1, "m_axis_tvalid should assert when FIFO has data");
+    assert(m_axis_tdata == 8'hA1, "Output data should immediately show first word 0xA1");
 
-    // Fill remaining 15 slots (total 16 writes)
-    wr_en = 1;
-    clk.step(15);
-    wr_en = 0;
-    assert(full == 1, "FIFO should be full after 16 writes");
-    assert(empty == 0, "FIFO should not be empty when full");
+    // Push 2nd byte: 0xB2
+    s_axis_tdata = 8'hB2;
+    clk.step(1);
+    assert(count == 2, "Count should be 2 after 2nd push");
 
-    // Read all 16 items
-    rd_en = 1;
-    clk.step(16);
-    rd_en = 0;
-    assert(empty == 1, "FIFO should be empty after reading all items");
-    assert(full == 0, "FIFO should not be full when empty");
-    assert(wr_ptr == 0, "wr_ptr should wrap to 0");
-    assert(rd_ptr == 0, "rd_ptr should wrap to 0");
+    // Push remaining 6 bytes to completely fill the 8-word FIFO: 0xC3, 0xD4, 0xE5, 0xF6, 0x17, 0x28
+    s_axis_tdata = 8'hC3;
+    clk.step(1);
+    s_axis_tdata = 8'hD4;
+    clk.step(1);
+    s_axis_tdata = 8'hE5;
+    clk.step(1);
+    s_axis_tdata = 8'hF6;
+    clk.step(1);
+    s_axis_tdata = 8'h17;
+    clk.step(1);
+    s_axis_tdata = 8'h28;
+    clk.step(1);
 
-    finish();
+    s_axis_tvalid = 0;
+
+    // Check full state
+    assert(count == 8, "FIFO should contain 8 words");
+    assert(full == 1, "FIFO should indicate full");
+    assert(s_axis_tready == 0, "s_axis_tready must deassert when full");
+
+    // Now drain words one by one and assert strict FIFO ordering
+    m_axis_tready = 1;
+
+    // Word 0: 0xA1
+    assert(m_axis_tdata == 8'hA1, "Word 0 mismatch");
+    clk.step(1);
+
+    // Word 1: 0xB2
+    assert(m_axis_tdata == 8'hB2, "Word 1 mismatch");
+    assert(full == 0, "FIFO must no longer be full after popping word 0");
+    assert(s_axis_tready == 1, "s_axis_tready must re-assert as soon as space opens");
+    clk.step(1);
+
+    // Word 2: 0xC3
+    assert(m_axis_tdata == 8'hC3, "Word 2 mismatch");
+    clk.step(1);
+
+    // Word 3: 0xD4
+    assert(m_axis_tdata == 8'hD4, "Word 3 mismatch");
+    clk.step(1);
+
+    // Word 4: 0xE5
+    assert(m_axis_tdata == 8'hE5, "Word 4 mismatch");
+    clk.step(1);
+
+    // Word 5: 0xF6
+    assert(m_axis_tdata == 8'hF6, "Word 5 mismatch");
+    clk.step(1);
+
+    // Word 6: 0x17
+    assert(m_axis_tdata == 8'h17, "Word 6 mismatch");
+    clk.step(1);
+
+    // Word 7: 0x28
+    assert(m_axis_tdata == 8'h28, "Word 7 mismatch");
+    clk.step(1);
+
+    m_axis_tready = 0;
+
+    // Now FIFO should be completely empty again
+    assert(count == 0, "FIFO count should be 0 after popping all 8 words");
+    assert(empty == 1, "FIFO should be empty");
+    assert(m_axis_tvalid == 0, "m_axis_tvalid must deassert when empty");
+
+    // Test concurrent streaming: push and pop in the exact same clock cycles
+    s_axis_tdata = 8'h99;
+    s_axis_tvalid = 1;
+    clk.step(1);
+    s_axis_tdata = 8'hAA;
+    m_axis_tready = 1; // Pop 0x99 while pushing 0xAA concurrently
+    clk.step(1);
+    assert(count == 1, "Count should remain 1 during 1-in-1-out streaming");
+    assert(m_axis_tdata == 8'hAA, "Next word 0xAA should now be presented at read port");
+
+    s_axis_tvalid = 0;
+    clk.step(1);
+    m_axis_tready = 0;
+    assert(empty == 1, "FIFO should be empty after streaming sequence");
 }

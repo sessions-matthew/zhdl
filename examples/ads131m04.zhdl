@@ -64,9 +64,6 @@ pub module Ads131m04Model {
     wire cmd: u16;
     wire cmd_addr: u6;
     wire wdata_in: u16;
-    cmd = 0;
-    cmd_addr = 0;
-    wdata_in = 0;
 
         // Status output wiring
         state_out = device_state;
@@ -83,16 +80,21 @@ pub module Ads131m04Model {
         wire cs_rising: u1 = (spi_cs_n && !cs_n_prev);
         wire sync_falling: u1 = (!sync_n && sync_prev);
 
-        // Previous pin tracking
-        sync_prev := sync_n;
-        sclk_prev := spi_sclk;
-        cs_n_prev := spi_cs_n;
-
         // Assemble the next 6-word 24-bit frame to transmit out MISO
         wire w0: u24 = if (rreg_pending) @concat(rreg_data, @as(u8, 0)) else @concat(reg_status, @as(u8, 0));
         wire next_tx_frame: u144 = @concat(w0, stim_ch0, stim_ch1, stim_ch2, stim_ch3, @as(u24, 0));
 
-        // Hardware SYNC / RESET pin
+        comb {
+            cmd = 0;
+            cmd_addr = 0;
+            wdata_in = 0;
+
+            // Previous pin tracking
+            sync_prev := sync_n;
+            sclk_prev := spi_sclk;
+            cs_n_prev := spi_cs_n;
+
+            // Hardware SYNC / RESET pin
         if (sync_falling || (!sync_n)) {
             device_state := 2; // ST_CONV
             reg_id := 0x2404;
@@ -225,6 +227,7 @@ pub module Ads131m04Model {
             }
         }
     }
+}
 
 test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
     wire clk: clock;

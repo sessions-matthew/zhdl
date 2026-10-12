@@ -5,3 +5,4 @@ zhdl
 .zhdl_sim/
 *.vcd
 obj_dir/
+benchmark_repos/

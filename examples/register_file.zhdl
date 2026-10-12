@@ -31,30 +31,32 @@ pub module RegisterFile {
     // 32-entry register array (each entry 32 bits wide)
     reg bank: [32]u32 = 0;
 
-    // Synchronous write update: x0 is hardwired to 0 (never written)
-    if (wr_en && (wr_addr != 0)) {
-        bank[wr_addr] := wr_data;
-    }
+    comb {
+        // Synchronous write update: x0 is hardwired to 0 (never written)
+        if (wr_en && (wr_addr != 0)) {
+            bank[wr_addr] := wr_data;
+        }
 
-    // Read Port 1 with Write-Through Forwarding (RAW hazard resolution)
-    if (rs1_addr == 0) {
-        rs1_data = 0;
-    } else if (wr_en && (wr_addr == rs1_addr)) {
-        rs1_data = wr_data; // Forward incoming write data immediately
-    } else {
-        rs1_data = bank[rs1_addr];
-    }
+        // Read Port 1 with Write-Through Forwarding (RAW hazard resolution)
+        if (rs1_addr == 0) {
+            rs1_data = 0;
+        } else if (wr_en && (wr_addr == rs1_addr)) {
+            rs1_data = wr_data; // Forward incoming write data immediately
+        } else {
+            rs1_data = bank[rs1_addr];
+        }
 
-    // Read Port 2 with Write-Through Forwarding
-    if (rs2_addr == 0) {
-        rs2_data = 0;
-    } else if (wr_en && (wr_addr == rs2_addr)) {
-        rs2_data = wr_data;
-    } else {
-        rs2_data = bank[rs2_addr];
-    }
+        // Read Port 2 with Write-Through Forwarding
+        if (rs2_addr == 0) {
+            rs2_data = 0;
+        } else if (wr_en && (wr_addr == rs2_addr)) {
+            rs2_data = wr_data;
+        } else {
+            rs2_data = bank[rs2_addr];
+        }
 
-    r0_is_zero = (bank[0] == 0);
+        r0_is_zero = (bank[0] == 0);
+    }
 }
 
 test "RegisterFile dual-read, write-forwarding, and x0 immutability" {

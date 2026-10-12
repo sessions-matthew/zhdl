@@ -12,8 +12,10 @@ pub const Counter = module {
 
     overflow = (count_reg == 255);
 
-    if (en) {
-        count_reg := count_reg +% 1;
+    comb {
+        if (en) {
+            count_reg := count_reg +% 1;
+        }
     }
 
     count = count_reg;

@@ -1,0 +1,274 @@
+// ==============================================================================
+// Hardware SHA-256 Cryptographic Hash Core in ZHdl
+// Conforms to NIST FIPS 180-4 Secure Hash Standard (SHS)
+//
+// Demonstrates:
+// - Comptime array constants: 64-entry K_TABLE [64]u32
+// - Pure combinational helper functions: rotr, sigma0/1, gamma0/1, ch, maj
+// - 16-register sliding window W memory with inline-for unrolling
+// - Indexed dynamic part-select: block[(15 - i) * 32 +: 32]
+// - Multi-block chaining with first_block control
+// - Full verification testbench against NIST FIPS 180-4 "abc" test vector
+// ==============================================================================
+
+pub fn rotr(x: u32, comptime n: u32) u32 {
+    return (x >> n) | (x << (32 - n));
+}
+
+pub fn sigma0(x: u32) u32 {
+    return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22);
+}
+
+pub fn sigma1(x: u32) u32 {
+    return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25);
+}
+
+pub fn gamma0(x: u32) u32 {
+    return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
+}
+
+pub fn gamma1(x: u32) u32 {
+    return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10);
+}
+
+pub fn ch(x: u32, y: u32, z: u32) u32 {
+    return (x & y) ^ (~x & z);
+}
+
+pub fn maj(x: u32, y: u32, z: u32) u32 {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+const H0_INIT: u32 = 0x6a09e667;
+const H1_INIT: u32 = 0xbb67ae85;
+const H2_INIT: u32 = 0x3c6ef372;
+const H3_INIT: u32 = 0xa54ff53a;
+const H4_INIT: u32 = 0x510e527f;
+const H5_INIT: u32 = 0x9b05688c;
+const H6_INIT: u32 = 0x1f83d9ab;
+const H7_INIT: u32 = 0x5be0cd19;
+
+pub module Sha256Core {
+    in clk: clock,
+    in rst: reset,
+
+    in start: u1,
+    in first_block: u1,
+    in block: u512,
+
+    out ready: u1,
+    out valid: u1,
+    out digest: [8]u32,
+
+    const K_TABLE: [64]u32 = .{
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    };
+
+    // FSM States
+    // 0: IDLE, 1: ROUNDS, 2: DONE
+    reg(clk, rst) state: u2 = 0;
+    reg(clk, rst) round: u6 = 0;
+
+    // Working state variables a..h
+    reg(clk, rst) a: u32 = 0;
+    reg(clk, rst) b: u32 = 0;
+    reg(clk, rst) c: u32 = 0;
+    reg(clk, rst) d: u32 = 0;
+    reg(clk, rst) e: u32 = 0;
+    reg(clk, rst) f: u32 = 0;
+    reg(clk, rst) g: u32 = 0;
+    reg(clk, rst) h: u32 = 0;
+
+    // Hash digest accumulator registers
+    reg(clk, rst) h0: u32 = H0_INIT;
+    reg(clk, rst) h1: u32 = H1_INIT;
+    reg(clk, rst) h2: u32 = H2_INIT;
+    reg(clk, rst) h3: u32 = H3_INIT;
+    reg(clk, rst) h4: u32 = H4_INIT;
+    reg(clk, rst) h5: u32 = H5_INIT;
+    reg(clk, rst) h6: u32 = H6_INIT;
+    reg(clk, rst) h7: u32 = H7_INIT;
+
+    // 16-word sliding message schedule memory
+    reg(clk, rst) w_mem: [16]u32 = 0;
+
+    reg(clk, rst) ready_reg: u1 = 1;
+    reg(clk, rst) valid_reg: u1 = 0;
+
+    comb {
+        ready = ready_reg;
+        valid = valid_reg;
+        digest = .{ h0, h1, h2, h3, h4, h5, h6, h7 };
+
+        if (state == 0) {
+            // IDLE state
+            ready_reg := 1;
+            valid_reg := 0;
+            if (start == 1) {
+                ready_reg := 0;
+                state := 1; // Enter ROUNDS
+                round := 0;
+
+                // Load initial state
+                if (first_block == 1) {
+                    a := H0_INIT;
+                    b := H1_INIT;
+                    c := H2_INIT;
+                    d := H3_INIT;
+                    e := H4_INIT;
+                    f := H5_INIT;
+                    g := H6_INIT;
+                    h := H7_INIT;
+
+                    h0 := H0_INIT;
+                    h1 := H1_INIT;
+                    h2 := H2_INIT;
+                    h3 := H3_INIT;
+                    h4 := H4_INIT;
+                    h5 := H5_INIT;
+                    h6 := H6_INIT;
+                    h7 := H7_INIT;
+                } else {
+                    a := h0;
+                    b := h1;
+                    c := h2;
+                    d := h3;
+                    e := h4;
+                    f := h5;
+                    g := h6;
+                    h := h7;
+                }
+
+                // Load initial 16 words from 512-bit message block (big-endian)
+                inline for (0..16) |i| {
+                    w_mem[i] := block[(15 - i) * 32 +: 32];
+                }
+            }
+        } else if (state == 1) {
+            // ROUNDS state
+            wire w_new: u32 = gamma1(w_mem[14]) + w_mem[9] + gamma0(w_mem[1]) + w_mem[0];
+            wire w_curr: u32 = if (round < 16) w_mem[round[0..4]] else w_new;
+
+            wire t1: u32 = h + sigma1(e) + ch(e, f, g) + K_TABLE[round] + w_curr;
+            wire t2: u32 = sigma0(a) + maj(a, b, c);
+
+            a := t1 + t2;
+            b := a;
+            c := b;
+            d := c;
+            e := d + t1;
+            f := e;
+            g := f;
+            h := g;
+
+            // Slide the W window for rounds 16..63
+            if (round > 15) {
+                inline for (0..15) |j| {
+                    w_mem[j] := w_mem[j + 1];
+                }
+                w_mem[15] := w_new;
+            }
+
+            if (round == 63) {
+                state := 2; // DONE
+            } else {
+                round := round + 1;
+            }
+        } else {
+            // DONE state: accumulate intermediate hash
+            h0 := h0 + a;
+            h1 := h1 + b;
+            h2 := h2 + c;
+            h3 := h3 + d;
+            h4 := h4 + e;
+            h5 := h5 + f;
+            h6 := h6 + g;
+            h7 := h7 + h;
+
+            valid_reg := 1;
+            ready_reg := 1;
+            state := 0; // Return to IDLE
+        }
+    }
+}
+
+test "Sha256Core NIST FIPS 180-4 standard vector 'abc'" {
+    wire clk: clock;
+    wire rst: reset;
+
+    wire start: u1 = 0;
+    wire first_block: u1 = 1;
+    wire block: u512 = 0;
+
+    wire ready: u1;
+    wire valid: u1;
+    wire digest: [8]u32;
+
+    const uut = Sha256Core.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .start = start,
+        .first_block = first_block,
+        .block = block,
+        .ready = ready,
+        .valid = valid,
+        .digest = digest,
+    });
+
+    clk.generate(100MHz);
+    rst.pulse(2);
+
+    // Verify ready high after reset
+    assert(ready == 1, "Core should be ready after reset");
+    assert(valid == 0, "Valid should be low after reset");
+
+    // Standard FIPS 180-4 test vector for "abc"
+    // Block words:
+    // W0 = 0x61626380 ('a','b','c', 0x80 pad)
+    // W1..W14 = 0x00000000
+    // W15 = 0x00000018 (length in bits = 24)
+    //
+    // In big-endian 512-bit vector:
+    // Bits 511..480 = W0 (0x61626380)
+    // Bits 31..0    = W15 (0x00000018)
+    wire test_block: u512 = (512'h61626380 << 480) | 512'h18;
+
+    block = test_block;
+    first_block = 1;
+    start = 1;
+    clk.step(1);
+    start = 0;
+
+    // Run 64 rounds + 1 accumulation cycle (state becomes DONE on cycle 64, valid asserts on cycle 65)
+    clk.step(65);
+
+    // Verify completion
+    assert(valid == 1, "Valid should be high upon completion");
+    assert(ready == 1, "Ready should be high upon completion");
+
+    // Expected digest for "abc":
+    // ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+    assert(digest[0] == 32'hba7816bf, "Digest H0 mismatch");
+    assert(digest[1] == 32'h8f01cfea, "Digest H1 mismatch");
+    assert(digest[2] == 32'h414140de, "Digest H2 mismatch");
+    assert(digest[3] == 32'h5dae2223, "Digest H3 mismatch");
+    assert(digest[4] == 32'hb00361a3, "Digest H4 mismatch");
+    assert(digest[5] == 32'h96177a9c, "Digest H5 mismatch");
+    assert(digest[6] == 32'hb410ff61, "Digest H6 mismatch");
+    assert(digest[7] == 32'hf20015ad, "Digest H7 mismatch");
+}

@@ -43,22 +43,24 @@ pub module PacketFilter(comptime W: usize) {
 
     reg active_header: ?PacketHeader = null;
 
-    switch (cmd) {
-        .ping => |echo| {
-            rx_stream = echo; // Auto-wraps payload into valid/data stream
-        },
-        .data => |hdr| {
-            if (hdr.isNull()) {
-                active_header := null; // Clears optional register
+    comb {
+        switch (cmd) {
+            .ping => |echo| {
+                rx_stream = echo; // Auto-wraps payload into valid/data stream
+            },
+            .data => |hdr| {
+                if (hdr.isNull()) {
+                    active_header := null; // Clears optional register
+                    rx_stream = null;
+                } else {
+                    active_header := hdr; // ':=' schedules 1-cycle flop update
+                    rx_stream = hdr.len[7:0];
+                }
+            },
+            .idle => {
                 rx_stream = null;
-            } else {
-                active_header := hdr;  // ':=' schedules 1-cycle flop update
-                rx_stream = hdr.len[7:0];
-            }
-        },
-        .idle => {
-            rx_stream = null;
-        },
+            },
+        }
     }
 }
 
@@ -119,7 +121,7 @@ zig build -Doptimize=ReleaseFast
 
 ---
 
-## Core Signal Model
+## Core Signal Model & Assignment Discipline
 
 | Entity | Description | Assignment | SystemVerilog Target |
 |---|---|:---:|---|
@@ -127,7 +129,10 @@ zig build -Doptimize=ReleaseFast
 | **`reg`** | 1-cycle clocked flip-flop / RAM array | `:=` | `always_ff @(posedge clk)` with `<=` |
 | **`const`** | Elaboration-time constant / submodule instance | `=` | SV module instance / parameter |
 
-- **Strict Physical Separation**: Combinational nets (`wire`) are assigned using `=`. Clocked state registers (`reg`) schedule 1-cycle updates using `:=`.
+- **Strict Assignment Discipline ("The One Obvious Way")**:
+  - Combinational nets (`wire`) and output ports are assigned strictly with `=`. Using `:=` on a wire triggers a compile error.
+  - Clocked state registers (`reg`) are updated inside `comb` blocks strictly with `:=` (including scalar registers, RAM array elements `mem[i] := din`, struct fields `pkt.cmd := val`, bit-slices `flags[0] := 1`, and tuples `.{ a, b } := ...`). Using `=` on a register triggers a compile error.
+  - Legacy `.next =` syntax is deprecated with actionable compiler errors directing developers to `:=`.
 - **Zero-Latch Guarantee**: Registers maintain default hold (`D = Q`). Transparent latches cannot be synthesized.
 
 ---
@@ -257,11 +262,12 @@ wire busy = state.isBusy();
 
 ---
 
-## Language Ergonomics & Verification
+## Language Architecture & Verification
 
-- **Optional `comb` Blocks & Flat Modules**: Write procedural statements, assignments, and control flow directly at module level without boilerplate `comb { ... }` wrappers.
-- **Optional `sim` Blocks & Flat Testbenches**: Write testbench stimulus, clock generation, reset pulses, stepping, and assertions directly at the top level of `test "name" { ... }`.
-- **Race-Condition & Read-Before-Write Prevention**: Static analysis verifies combinational wires are written before read, and unifies all module logic into a single procedural domain to prevent delta-cycle races.
+- **Declarative Module Scope & Explicit `comb` Blocks**: Module root is strictly declarative (ports, continuous wire assignments, constants, sub-module instantiations, and register declarations). All procedural combinational logic, control flow (`if`, `switch`, loops), and register updates must be enclosed in explicit `comb { ... }` blocks ("The One Obvious Way"). Bare anonymous `{ ... }` blocks, floating control-flow, and bare register updates at module root are rejected at compile time.
+- **Clock Binding to Registers (No `sync` Blocks)**: Clocks and resets are bound directly to registers (`reg(clk, rst)`). Legacy `sync` blocks are deprecated with actionable compiler errors.
+- **Flat Testbenches (`test "name" { ... }`)**: Write testbench stimulus, clock generation, reset pulses, stepping, and assertions directly at the top level of `test` blocks.
+- **Race-Condition & Read-Before-Write Prevention**: Static analysis verifies combinational wires are written before read, and unifies all procedural logic into a single SystemVerilog `always_comb` process to eliminate simulator delta-cycle event races.
 - **Single-Writer Rule**: Multiple concurrent drivers on the same wire or port contention are rejected during semantic elaboration.
 - **DAG Combinational Loop Detection**: Zero-delay feedback paths ($a \to b \to a$) are detected via 3-color directed acyclic graph (DAG) cycle checks and rejected before synthesis.
 - **Static CDC Verification**: Rejects unsynchronized cross-clock domain transfers at compile time; provides safe crossing via `@sync2ff`.
@@ -270,7 +276,7 @@ wire busy = state.isBusy();
 
 ## Built-in Hardware Primitives
 
-- **`@concat(a, b, ...)`**: Vector concatenation (`{a, b}`).
+- **Native Aggregate Packing `.{ a, b }` & `@concat(a, b, ...)`**: Clean anonymous bit concatenation (`{a, b}`) for bit vectors and tuple register updates (`.{ r_hi, r_lo } := .{ in_data[4..8], in_data[0..4] }`).
 - **`@truncate(T, x)` / `@bitCast(T, x)`**: Explicit bit manipulation and sizing.
 - **`@bitReverse(x)` / `@byteSwap(x)`**: Zero-cost bit/byte streaming (`{<<{x}}`, `{<<8{x}}`).
 - **`@sync2ff(dest_clk, sig)`**: 2-stage synchronizer with `(* ASYNC_REG = "TRUE" *)` synthesis attribute.
@@ -340,6 +346,11 @@ The [`examples/`](examples/) directory includes full, self-contained hardware de
 | [`ads131m04.zhdl`](examples/ads131m04.zhdl) | Industrial 24-bit 4-channel delta-sigma ADC hardware interface with synchronous SPI framed protocol, DRDY pulse generation, and register control. |
 | [`uart_bridge.zhdl`](examples/uart_bridge.zhdl) | Full-duplex UART receiver/transmitter with start/stop framing, CRC16 verification, byte streaming, and host injection FIFO. |
 | [`am335x_timer.zhdl`](examples/am335x_timer.zhdl) | AM335x SoC 32-bit hardware timer peripheral with OCP register bus interface, compare-match interrupts, prescaler, and soft reset. |
+| [`sha256.zhdl`](examples/sha256.zhdl) | Complete NIST FIPS 180-4 SHA-256 cryptographic hashing core with 64-round expansion, message schedule buffer (`w_mem`), 8 state variables (`a` through `h`), and standard test vector verification. |
+| [`riscv_div.zhdl`](examples/riscv_div.zhdl) | 32-bit non-restoring integer divider with quotient/remainder output, divide-by-zero detection, and multi-cycle completion handshakes. |
+| [`serv_alu.zhdl`](examples/serv_alu.zhdl) | Bit-serial RISC-V ALU based on the award-winning SERV core with carry tracking and bit-wise logical operations. |
+| [`arbiter.zhdl`](examples/arbiter.zhdl) | 4-client round-robin arbiter with rotating priority mask and single-grant mutual exclusion guarantee. |
+| [`uart.zhdl`](examples/uart.zhdl) | Full-duplex UART transceiver with 8N1 framing, 16x oversampling baud rate generator, and loopback testbench. |
 | [`fifo.zhdl`](examples/fifo.zhdl) | Parameterized synchronous FIFO with status flags (`full`, `empty`), rollover pointers, and RAM buffer. |
 | [`fsm.zhdl`](examples/fsm.zhdl) | Clean Moore/Mealy finite state machine with tagged enum states, one-hot transition logic, and pulse outputs. |
 | [`counter.zhdl`](examples/counter.zhdl) | Basic synchronous counter with wrap-around, downward bit slicing `[4..0]`, and flat testbench. |

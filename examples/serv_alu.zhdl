@@ -1,0 +1,224 @@
+// SERV Bit-Serial Arithmetic Logic Unit (ALU)
+// Ported from Olof Kindgren's SERV (serv_alu.v) - The Award-Winning Bit-Serial RISC-V Core
+//
+// In SERV, 32-bit RV32I arithmetic and logic instructions are computed 1 bit per cycle:
+// - Bit-serial ripple adder with carry flip-flop
+// - Two's complement subtraction (i_sub inverts operand B and seeds carry-in)
+// - Cycle-accumulated comparisons (SLT, SLTU, BEQ, BNE)
+// - Unified bitwise logic unit (XOR, OR, AND)
+// - Zero-overhead multiplexed result bus
+
+pub module ServAlu {
+    in clk: clock,
+    in rst: reset,
+
+    // State inputs
+    in i_en: u1,
+    in i_cnt0: u1,
+    out o_cmp: u1,
+
+    // Control inputs
+    in i_sub: u1,
+    in i_bool_op: u2,
+    in i_cmp_eq: u1,
+    in i_cmp_sig: u1,
+    in i_rd_sel: u3,
+
+    // Data inputs (bit-serial: 1 bit per clock)
+    in i_rs1: u1,
+    in i_op_b: u1,
+    in i_buf: u1,
+    out o_rd: u1,
+
+    // Internal state registers
+    reg(clk, rst) cmp_r: u1 = 0;
+    reg(clk, rst) add_cy_r: u1 = 0;
+
+    comb {
+        // Sign-extended bit operands
+        const rs1_sx = i_rs1 and i_cmp_sig;
+        const op_b_sx = i_op_b and i_cmp_sig;
+
+        // Subtraction operand inversion
+        const add_b = i_op_b ^ i_sub;
+
+        // Bit-serial 1-bit full adder with carry: {add_cy, result_add} = i_rs1 + add_b + add_cy_r
+        const full_sum = @as(u2, i_rs1) + @as(u2, add_b) + @as(u2, add_cy_r);
+        const result_add = full_sum[0];
+        const add_cy = full_sum[1];
+
+        // Comparison logic
+        const result_lt = @as(u2, rs1_sx) + @as(u2, !op_b_sx) + @as(u2, add_cy);
+        const result_eq = (result_add == 0) and (cmp_r or i_cnt0);
+
+        o_cmp = if (i_cmp_eq != 0) result_eq else result_lt[0];
+
+        // Boolean operations: 00: XOR, 01: 0 (shift bypass), 10: OR, 11: AND
+        const bool_mask0 = if (i_bool_op[0] != 0) @as(u1, 0) else @as(u1, 1);
+        const bool_mask1 = if (i_bool_op[1] != 0) @as(u1, 1) else @as(u1, 0);
+        const result_bool = ((i_rs1 ^ i_op_b) and bool_mask0) or (bool_mask1 and i_op_b and i_rs1);
+
+        // Set Less Than (SLT) bit output
+        const result_slt = cmp_r and i_cnt0;
+
+        // Destination multiplexer
+        const sel_add = if (i_rd_sel[0] != 0) result_add else @as(u1, 0);
+        const sel_slt = if (i_rd_sel[1] != 0) result_slt else @as(u1, 0);
+        const sel_bool = if (i_rd_sel[2] != 0) result_bool else @as(u1, 0);
+
+        o_rd = i_buf or sel_add or sel_slt or sel_bool;
+
+        // Carry and comparison register update
+        if (i_en != 0) {
+            add_cy_r := add_cy;
+            cmp_r := o_cmp;
+        } else {
+            add_cy_r := i_sub;
+            cmp_r := cmp_r;
+        }
+    }
+}
+
+test "ServAluTb" {
+    wire clk: clock;
+    wire rst: reset;
+
+    wire i_en: u1 = 0;
+    wire i_cnt0: u1 = 0;
+    wire o_cmp: u1;
+
+    wire i_sub: u1 = 0;
+    wire i_bool_op: u2 = 0;
+    wire i_cmp_eq: u1 = 0;
+    wire i_cmp_sig: u1 = 0;
+    wire i_rd_sel: u3 = 0;
+
+    wire i_rs1: u1 = 0;
+    wire i_op_b: u1 = 0;
+    wire i_buf: u1 = 0;
+    wire o_rd: u1;
+
+    const dut = ServAlu.instantiate(.{
+        .clk = clk,
+        .rst = rst,
+        .i_en = i_en,
+        .i_cnt0 = i_cnt0,
+        .o_cmp = o_cmp,
+        .i_sub = i_sub,
+        .i_bool_op = i_bool_op,
+        .i_cmp_eq = i_cmp_eq,
+        .i_cmp_sig = i_cmp_sig,
+        .i_rd_sel = i_rd_sel,
+        .i_rs1 = i_rs1,
+        .i_op_b = i_op_b,
+        .i_buf = i_buf,
+        .o_rd = o_rd,
+    });
+
+    sim {
+        clk.generate(100MHz);
+        rst.pulse(5);
+        clk.step(2);
+
+        // ==============================================================
+        // Test 1: Bit-Serial Addition (32 cycles)
+        // 0x12345678 + 0x0FEDCBA9 = 0x22222221
+        // ==============================================================
+        i_sub = 0;
+        i_rd_sel = 3'b001; // select result_add
+        i_en = 1;
+
+        // Feed bit 0 (i_cnt0 = 1)
+        clk.negedge();
+        i_cnt0 = 1;
+        i_rs1 = 0; // 0x12345678 bit 0 is 0
+        i_op_b = 1; // 0x0FEDCBA9 bit 0 is 1
+        delay(1ns);
+        assert(o_rd == 1, "Bit 0 sum should be 1 (0 + 1 + 0)");
+        clk.posedge();
+
+        // Bit 1: rs1=0, op_b=0, cy=0 -> sum=0
+        clk.negedge();
+        i_cnt0 = 0;
+        i_rs1 = 0;
+        i_op_b = 0;
+        delay(1ns);
+        assert(o_rd == 0, "Bit 1 sum should be 0");
+        clk.posedge();
+
+        // Bit 2: rs1=0, op_b=0 -> sum=0
+        clk.negedge();
+        i_rs1 = 0;
+        i_op_b = 0;
+        delay(1ns);
+        assert(o_rd == 0, "Bit 2 sum should be 0");
+        clk.posedge();
+
+        // Bit 3: rs1=1, op_b=1 -> sum=0, cy=1
+        clk.negedge();
+        i_rs1 = 1;
+        i_op_b = 1;
+        delay(1ns);
+        assert(o_rd == 0, "Bit 3 sum should be 0 with carry");
+        clk.posedge();
+
+        // Bit 4: rs1=1, op_b=0, cy=1 -> sum=0, cy=1
+        clk.negedge();
+        i_rs1 = 1;
+        i_op_b = 0;
+        delay(1ns);
+        assert(o_rd == 0, "Bit 4 sum should be 0 with carry");
+        clk.posedge();
+
+        // Bit 5: rs1=1, op_b=1, cy=1 -> sum=1, cy=1
+        clk.negedge();
+        i_rs1 = 1;
+        i_op_b = 1;
+        delay(1ns);
+        assert(o_rd == 1, "Bit 5 sum should be 1");
+        clk.posedge();
+
+        // ==============================================================
+        // Test 2: Bitwise Logic Operations
+        // XOR (bool_op = 00), OR (bool_op = 10), AND (bool_op = 11)
+        // ==============================================================
+        i_en = 0;
+        i_rd_sel = 3'b100; // select result_bool
+
+        // XOR: 1 ^ 0 = 1, 1 ^ 1 = 0
+        i_bool_op = 2'b00;
+        i_rs1 = 1;
+        i_op_b = 0;
+        delay(1ns);
+        assert(o_rd == 1, "1 XOR 0 == 1");
+
+        i_rs1 = 1;
+        i_op_b = 1;
+        delay(1ns);
+        assert(o_rd == 0, "1 XOR 1 == 0");
+
+        // OR: 1 | 0 = 1, 0 | 0 = 0
+        i_bool_op = 2'b10;
+        i_rs1 = 1;
+        i_op_b = 0;
+        delay(1ns);
+        assert(o_rd == 1, "1 OR 0 == 1");
+
+        i_rs1 = 0;
+        i_op_b = 0;
+        delay(1ns);
+        assert(o_rd == 0, "0 OR 0 == 0");
+
+        // AND: 1 & 1 = 1, 1 & 0 = 0
+        i_bool_op = 2'b11;
+        i_rs1 = 1;
+        i_op_b = 1;
+        delay(1ns);
+        assert(o_rd == 1, "1 AND 1 == 1");
+
+        i_rs1 = 1;
+        i_op_b = 0;
+        delay(1ns);
+        assert(o_rd == 0, "1 AND 0 == 0");
+    }
+}

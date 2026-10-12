@@ -6,23 +6,6 @@ const hir = @import("hir.zig");
 const TokenType = @import("token.zig").TokenType;
 const parser_mod = @import("parser.zig");
 
-pub const ElaborateError = error{
-    ModuleNotFound,
-    PortNotFound,
-    SymbolNotFound,
-    TypeMismatch,
-    InvalidComptimeExpr,
-    SignalAlreadyDeclared,
-    CannotAssignInputPort,
-    MultipleDrivers,
-    CombinationalLoop,
-    ClockDomainCrossing,
-    MissingClockSignal,
-    OutOfMemory,
-    CircularImport,
-    FileNotFound,
-};
-
 pub const ImportedPackage = struct {
     name: []const u8,
     path: []const u8,
@@ -881,20 +864,6 @@ pub const Elaborator = struct {
                     },
                 };
             },
-            .sync_block => {
-                const s = item.data.sync_block;
-                return .{
-                    .tag = .sync_block,
-                    .loc = item.loc,
-                    .data = .{
-                        .sync_block = .{
-                            .clk = try self.cloneExpr(alloc, s.clk, substs),
-                            .rst = if (s.rst) |rst| try self.cloneExpr(alloc, rst, substs) else null,
-                            .stmts = try self.cloneStatements(alloc, s.stmts, substs),
-                        },
-                    },
-                };
-            },
             .const_decl => {
                 const c = item.data.const_decl;
                 return .{
@@ -1480,6 +1449,40 @@ pub const Elaborator = struct {
                         .struct_init = .{
                             .type_expr = if (si.type_expr) |te| try self.cloneType(alloc, te, substs) else null,
                             .fields = fields,
+                        },
+                    },
+                };
+                return new_e;
+            },
+            .array_init => {
+                const ai = expr.data.array_init;
+                var elements = try alloc.alloc(*ast.Expr, ai.elements.len);
+                for (ai.elements, 0..) |elem, i| {
+                    elements[i] = try self.cloneExpr(alloc, elem, substs);
+                }
+                new_e.* = .{
+                    .tag = .array_init,
+                    .loc = expr.loc,
+                    .data = .{
+                        .array_init = .{
+                            .type_expr = if (ai.type_expr) |te| try self.cloneType(alloc, te, substs) else null,
+                            .elements = elements,
+                        },
+                    },
+                };
+                return new_e;
+            },
+            .part_select => {
+                const ps = expr.data.part_select;
+                new_e.* = .{
+                    .tag = .part_select,
+                    .loc = expr.loc,
+                    .data = .{
+                        .part_select = .{
+                            .target = try self.cloneExpr(alloc, ps.target, substs),
+                            .base = try self.cloneExpr(alloc, ps.base, substs),
+                            .width = try self.cloneExpr(alloc, ps.width, substs),
+                            .is_up = ps.is_up,
                         },
                     },
                 };
@@ -2537,6 +2540,13 @@ pub const Elaborator = struct {
                         if (val.tag == .lit and h_type.width > 0) {
                             val.hir_type.width = h_type.width;
                         }
+                        if (h_type.tag == .array and val.tag == .array_init) {
+                            for (val.data.array_init.elements) |elem| {
+                                if (elem.tag == .lit and h_type.elem_width > 0) {
+                                    elem.hir_type.width = h_type.elem_width;
+                                }
+                            }
+                        }
                         try comb_stmts.append(.{
                             .tag = .assign,
                             .data = .{
@@ -2555,54 +2565,6 @@ pub const Elaborator = struct {
                 },
                 .stmt => {
                     try self.lowerStatement(alloc, item.data.stmt, &comb_stmts, &local_signals, &reg_map, &signal_types);
-                },
-                .sync_block => {
-                    const sb = item.data.sync_block;
-                    const clk_str = if (sb.clk.tag == .identifier) sb.clk.data.identifier else "clk";
-                    const rst_str: ?[]const u8 = if (sb.rst != null and sb.rst.?.tag == .identifier)
-                        sb.rst.?.data.identifier
-                    else
-                        null;
-
-                    // Statements in sync block lower to register assignments
-                    for (sb.stmts) |stmt| {
-                        if (stmt.tag == .assign) {
-                            const a = stmt.data.assign;
-                            if (a.target.tag == .identifier) {
-                                const var_name = a.target.data.identifier;
-                                // If not already a register, promote it to one
-                                if (reg_map.get(var_name) == null) {
-                                    const h_type: hir.HirType = .{ .tag = .bits, .width = 32 };
-                                    const q_name = try std.fmt.allocPrint(alloc, "{s}_q", .{var_name});
-                                    const d_name = try std.fmt.allocPrint(alloc, "{s}_d", .{var_name});
-                                    var rst_active_low = false;
-                                    if (rst_str) |s| {
-                                        if (signal_types.get(s)) |st| {
-                                            rst_active_low = st.is_active_low;
-                                        }
-                                    }
-                                    const hir_reg: hir.HirRegister = .{
-                                        .name = var_name,
-                                        .q_name = q_name,
-                                        .d_name = d_name,
-                                        .hir_type = h_type,
-                                        .clk_name = clk_str,
-                                        .rst_name = rst_str,
-                                        .rst_active_low = rst_active_low,
-                                        .init_val = 0,
-                                    };
-                                    try registers.append(hir_reg);
-                                    try reg_map.put(var_name, hir_reg);
-                                    try signal_types.put(var_name, h_type);
-                                    try signal_types.put(q_name, h_type);
-                                    try signal_types.put(d_name, h_type);
-                                    try local_signals.append(.{ .name = q_name, .hir_type = h_type });
-                                    try local_signals.append(.{ .name = d_name, .hir_type = h_type });
-                                }
-                            }
-                        }
-                        try self.lowerStatement(alloc, stmt, &comb_stmts, &local_signals, &reg_map, &signal_types);
-                    }
                 },
                 else => {},
             }
@@ -2668,9 +2630,6 @@ pub const Elaborator = struct {
                     if (self.resolveGenericCall(c.val, items) != null) {
                         // generic module alias - skip
                     } else if (c.val.tag == .type_expr) {
-                        const h_type = try self.lowerType(c.val.data.type_expr);
-                        try self.types.put(c.name, h_type);
-                        try signal_types.put(c.name, h_type);
                     } else if (c.type_annot) |ta| {
                         const h_type = try self.lowerType(ta);
                         try signals.append(.{ .name = c.name, .hir_type = h_type });
@@ -2816,6 +2775,13 @@ pub const Elaborator = struct {
                             if (val.tag == .lit and h_type.width > 0) {
                                 val.hir_type.width = h_type.width;
                             }
+                            if (h_type.tag == .array and val.tag == .array_init) {
+                                for (val.data.array_init.elements) |elem| {
+                                    if (elem.tag == .lit and h_type.elem_width > 0) {
+                                        elem.hir_type.width = h_type.elem_width;
+                                    }
+                                }
+                            }
                             try sim_stmts.append(.{
                                 .tag = .assign,
                                 .data = .{
@@ -2916,6 +2882,230 @@ pub const Elaborator = struct {
         return .{ .period_ns = period_ns, .half_str = half_str };
     }
 
+    fn hasDotNext(target: *const ast.Expr) bool {
+        switch (target.tag) {
+            .member_access => {
+                if (std.mem.eql(u8, target.data.member_access.field, "next")) return true;
+                return hasDotNext(target.data.member_access.target);
+            },
+            .index => return hasDotNext(target.data.index.target),
+            .slice => return hasDotNext(target.data.slice.target),
+            .part_select => return hasDotNext(target.data.part_select.target),
+            .builtin_call => {
+                if (target.data.builtin_call.tag == .builtin_concat) {
+                    for (target.data.builtin_call.args) |a| {
+                        if (hasDotNext(a)) return true;
+                    }
+                }
+                return false;
+            },
+            .array_init => {
+                for (target.data.array_init.elements) |elem| {
+                    if (hasDotNext(elem)) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn collectAstTargetBaseNames(target: *const ast.Expr, out_names: *ArrayList([]const u8)) anyerror!void {
+        switch (target.tag) {
+            .identifier => try out_names.append(target.data.identifier),
+            .member_access => {
+                try collectAstTargetBaseNames(target.data.member_access.target, out_names);
+            },
+            .index => try collectAstTargetBaseNames(target.data.index.target, out_names),
+            .slice => try collectAstTargetBaseNames(target.data.slice.target, out_names),
+            .part_select => try collectAstTargetBaseNames(target.data.part_select.target, out_names),
+            .builtin_call => {
+                if (target.data.builtin_call.tag == .builtin_concat) {
+                    for (target.data.builtin_call.args) |a| {
+                        try collectAstTargetBaseNames(a, out_names);
+                    }
+                }
+            },
+            .array_init => {
+                for (target.data.array_init.elements) |elem| {
+                    try collectAstTargetBaseNames(elem, out_names);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn collectHirTargetBaseNames(target: *const hir.HirExpr, out_names: *ArrayList([]const u8)) anyerror!void {
+        switch (target.tag) {
+            .signal_ref => try out_names.append(target.data.signal_ref.name),
+            .index => try collectHirTargetBaseNames(target.data.index.target, out_names),
+            .slice => try collectHirTargetBaseNames(target.data.slice.target, out_names),
+            .member => try collectHirTargetBaseNames(target.data.member.target, out_names),
+            .part_select => try collectHirTargetBaseNames(target.data.part_select.target, out_names),
+            .concat => {
+                for (target.data.concat.args) |a| {
+                    try collectHirTargetBaseNames(a, out_names);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn lowerTargetExpr(
+        self: *Elaborator,
+        alloc: std.mem.Allocator,
+        target_ast: *ast.Expr,
+        is_reg_assign: bool,
+        reg_map: *const std.StringHashMap(hir.HirRegister),
+        signal_types: *const std.StringHashMap(hir.HirType),
+    ) anyerror!*hir.HirExpr {
+        switch (target_ast.tag) {
+            .identifier => {
+                const name = target_ast.data.identifier;
+                if (reg_map.get(name)) |r| {
+                    const h_target = try alloc.create(hir.HirExpr);
+                    h_target.* = .{
+                        .tag = .signal_ref,
+                        .hir_type = r.hir_type,
+                        .data = .{ .signal_ref = .{ .name = r.d_name } },
+                    };
+                    return h_target;
+                } else {
+                    const h_type = signal_types.get(name) orelse hir.HirType{ .tag = .bits, .width = 32 };
+                    const h_target = try alloc.create(hir.HirExpr);
+                    h_target.* = .{
+                        .tag = .signal_ref,
+                        .hir_type = h_type,
+                        .data = .{ .signal_ref = .{ .name = name } },
+                    };
+                    return h_target;
+                }
+            },
+            .member_access => {
+                const ma = target_ast.data.member_access;
+                if (std.mem.eql(u8, ma.field, "next")) {
+                    return try self.lowerTargetExpr(alloc, ma.target, true, reg_map, signal_types);
+                }
+                const sub_target = try self.lowerTargetExpr(alloc, ma.target, is_reg_assign, reg_map, signal_types);
+                if (sub_target.hir_type.getStructField(ma.field)) |f| {
+                    const h_target = try alloc.create(hir.HirExpr);
+                    h_target.* = .{
+                        .tag = .slice,
+                        .hir_type = .{ .tag = .bits, .width = f.width },
+                        .data = .{
+                            .slice = .{
+                                .target = sub_target,
+                                .start = f.offset,
+                                .end = f.offset + f.width,
+                                .is_downward = false,
+                            },
+                        },
+                    };
+                    return h_target;
+                }
+                return try self.lowerExpr(alloc, target_ast, reg_map, signal_types);
+            },
+            .index => {
+                const base = try self.lowerTargetExpr(alloc, target_ast.data.index.target, is_reg_assign, reg_map, signal_types);
+                const idx_e = try self.lowerExpr(alloc, target_ast.data.index.index, reg_map, signal_types);
+                const elem_w = if (base.hir_type.tag == .array) base.hir_type.elem_width else 1;
+                const h_target = try alloc.create(hir.HirExpr);
+                h_target.* = .{
+                    .tag = .index,
+                    .hir_type = .{ .tag = .bits, .width = elem_w },
+                    .data = .{ .index = .{ .target = base, .index = idx_e } },
+                };
+                return h_target;
+            },
+            .slice => {
+                const sl = target_ast.data.slice;
+                const base = try self.lowerTargetExpr(alloc, sl.target, is_reg_assign, reg_map, signal_types);
+                const s_val: u32 = @intCast(self.evalConst(sl.start));
+                const e_val: u32 = @intCast(self.evalConst(sl.end));
+                var is_down = sl.is_downward;
+                var s = s_val;
+                var e = e_val;
+                if (s_val > e_val) {
+                    is_down = true;
+                    s = e_val;
+                    e = s_val;
+                }
+                const w = if (e >= s) e - s else 1;
+                const h_target = try alloc.create(hir.HirExpr);
+                h_target.* = .{
+                    .tag = .slice,
+                    .hir_type = .{ .tag = .bits, .width = w },
+                    .data = .{
+                        .slice = .{
+                            .target = base,
+                            .start = s,
+                            .end = e,
+                            .is_downward = is_down,
+                        },
+                    },
+                };
+                return h_target;
+            },
+            .part_select => {
+                const ps = target_ast.data.part_select;
+                const base = try self.lowerTargetExpr(alloc, ps.target, is_reg_assign, reg_map, signal_types);
+                const b_expr = try self.lowerExpr(alloc, ps.base, reg_map, signal_types);
+                const w: u32 = @intCast(self.evalConst(ps.width));
+                const h_target = try alloc.create(hir.HirExpr);
+                h_target.* = .{
+                    .tag = .part_select,
+                    .hir_type = .{ .tag = .bits, .width = w },
+                    .data = .{
+                        .part_select = .{
+                            .target = base,
+                            .base = b_expr,
+                            .width = w,
+                            .is_up = ps.is_up,
+                        },
+                    },
+                };
+                return h_target;
+            },
+            .builtin_call => {
+                const bc = target_ast.data.builtin_call;
+                if (bc.tag == .builtin_concat) {
+                    var args = ArrayList(*hir.HirExpr).init(alloc);
+                    var total_w: u32 = 0;
+                    for (bc.args) |a| {
+                        const sub = try self.lowerTargetExpr(alloc, a, is_reg_assign, reg_map, signal_types);
+                        try args.append(sub);
+                        total_w += sub.hir_type.width;
+                    }
+                    const h_target = try alloc.create(hir.HirExpr);
+                    h_target.* = .{
+                        .tag = .concat,
+                        .hir_type = .{ .tag = .bits, .width = total_w },
+                        .data = .{ .concat = .{ .args = try args.toOwnedSlice() } },
+                    };
+                    return h_target;
+                }
+                return try self.lowerExpr(alloc, target_ast, reg_map, signal_types);
+            },
+            .array_init => {
+                const ai = target_ast.data.array_init;
+                var args = ArrayList(*hir.HirExpr).init(alloc);
+                var total_w: u32 = 0;
+                for (ai.elements) |elem| {
+                    const sub = try self.lowerTargetExpr(alloc, elem, is_reg_assign, reg_map, signal_types);
+                    try args.append(sub);
+                    total_w += sub.hir_type.width;
+                }
+                const h_target = try alloc.create(hir.HirExpr);
+                h_target.* = .{
+                    .tag = .concat,
+                    .hir_type = .{ .tag = .bits, .width = total_w },
+                    .data = .{ .concat = .{ .args = try args.toOwnedSlice() } },
+                };
+                return h_target;
+            },
+            else => return try self.lowerExpr(alloc, target_ast, reg_map, signal_types),
+        }
+    }
+
     fn lowerSimStatement(
         self: *Elaborator,
         alloc: std.mem.Allocator,
@@ -2928,7 +3118,7 @@ pub const Elaborator = struct {
         switch (stmt.tag) {
             .assign => {
                 const a = stmt.data.assign;
-                const target = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
+                const target = try self.lowerTargetExpr(alloc, a.target, false, reg_map, signal_types);
                 var val_expr: *hir.HirExpr = undefined;
 
                 if (target.hir_type.tag == .optional) {
@@ -3026,6 +3216,11 @@ pub const Elaborator = struct {
                         val_expr.hir_type.is_signed = true;
                         val_expr.data.unary.operand.hir_type.is_signed = true;
                     }
+                }
+                if (target.hir_type.tag != .array and val_expr.tag == .array_init) {
+                    const elems = val_expr.data.array_init.elements;
+                    val_expr.tag = .concat;
+                    val_expr.data = .{ .concat = .{ .args = elems } };
                 }
                 try sim_stmts.append(.{
                     .tag = .assign,
@@ -3430,10 +3625,36 @@ pub const Elaborator = struct {
                     .hir_type = h_type,
                     .data = .{ .signal_ref = .{ .name = vd.name } },
                 };
-                const val_expr = try self.lowerExpr(alloc, vd.init_val, reg_map, signal_types);
+                var val_expr = try self.lowerExpr(alloc, vd.init_val, reg_map, signal_types);
                 if (val_expr.tag == .lit and h_type.width > 0) {
                     val_expr.hir_type.width = h_type.width;
                     if (h_type.is_signed) val_expr.hir_type.is_signed = true;
+                }
+                if (h_type.tag == .array) {
+                    if (val_expr.tag == .array_init) {
+                        for (val_expr.data.array_init.elements) |elem| {
+                            if (elem.tag == .lit and h_type.elem_width > 0) {
+                                elem.hir_type.width = h_type.elem_width;
+                            }
+                        }
+                    } else if (val_expr.tag == .lit and val_expr.data.lit.val == 0) {
+                        var zero_elems = try alloc.alloc(*hir.HirExpr, h_type.array_len);
+                        for (0..h_type.array_len) |zi| {
+                            const z_expr = try alloc.create(hir.HirExpr);
+                            z_expr.* = .{
+                                .tag = .lit,
+                                .hir_type = .{ .tag = .bits, .width = h_type.elem_width },
+                                .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                            };
+                            zero_elems[zi] = z_expr;
+                        }
+                        val_expr = try alloc.create(hir.HirExpr);
+                        val_expr.* = .{
+                            .tag = .array_init,
+                            .hir_type = h_type,
+                            .data = .{ .array_init = .{ .elements = zero_elems } },
+                        };
+                    }
                 }
                 try sim_stmts.append(.{
                     .tag = .assign,
@@ -3447,8 +3668,8 @@ pub const Elaborator = struct {
             },
             .inline_for => {
                 const loop = stmt.data.inline_for;
-                const start_val = if (loop.start.tag == .number) loop.start.data.number.val else 0;
-                const end_val = if (loop.end.tag == .number) loop.end.data.number.val else 0;
+                const start_val = self.evalConst(loop.start);
+                const end_val = self.evalConst(loop.end);
 
                 var idx = start_val;
                 while (idx < end_val) : (idx += 1) {
@@ -3641,7 +3862,10 @@ pub const Elaborator = struct {
                 const a = stmt.data.assign;
 
                 if (a.is_reg_assign) {
-                    if (getAstTargetBaseName(a.target)) |bn| {
+                    var names = ArrayList([]const u8).init(alloc);
+                    defer names.deinit();
+                    try collectAstTargetBaseNames(a.target, &names);
+                    for (names.items) |bn| {
                         if (reg_map.get(bn) == null) {
                             std.debug.print(
                                 \\
@@ -3660,87 +3884,54 @@ pub const Elaborator = struct {
                             return error.TypeMismatch;
                         }
                     }
+                } else {
+                    if (hasDotNext(a.target)) {
+                        var names = ArrayList([]const u8).init(alloc);
+                        defer names.deinit();
+                        try collectAstTargetBaseNames(a.target, &names);
+                        const first_name = if (names.items.len > 0) names.items[0] else "reg";
+                        std.debug.print(
+                            \\
+                            \\======================================================================
+                            \\COMPILE ERROR: Deprecated Register '.next' Syntax
+                            \\======================================================================
+                            \\Register '.next' assignment syntax is deprecated.
+                            \\In ZHdl, clocked registers are updated using the ':=' operator.
+                            \\
+                            \\Fix:
+                            \\  Use ':=' to update register state:
+                            \\    {s} := ...;
+                            \\======================================================================
+                            \\
+                            , .{first_name});
+                        return error.TypeMismatch;
+                    }
+
+                    var names = ArrayList([]const u8).init(alloc);
+                    defer names.deinit();
+                    try collectAstTargetBaseNames(a.target, &names);
+                    for (names.items) |bn| {
+                        if (reg_map.get(bn) != null) {
+                            std.debug.print(
+                                \\
+                                \\======================================================================
+                                \\COMPILE ERROR: Cannot Assign Clocked Register '{s}' Using '='
+                                \\======================================================================
+                                \\Cannot assign clocked register '{s}' using '='.
+                                \\Registers update synchronously on clock edges using ':='.
+                                \\
+                                \\Fix:
+                                \\  Use ':=' to update register state:
+                                \\    {s} := ...;
+                                \\======================================================================
+                                \\
+                                , .{ bn, bn, bn });
+                            return error.TypeMismatch;
+                        }
+                    }
                 }
 
-                // Handle reg.next = val, reg.next[idx] = val, reg[idx].next = val, reg[idx] = val, reg := val
-                var target_expr: *hir.HirExpr = undefined;
-                if (a.target.tag == .member_access and
-                    std.mem.eql(u8, a.target.data.member_access.field, "next"))
-                {
-                    const base = a.target.data.member_access.target;
-                    if (base.tag == .identifier) {
-                        const reg_name = base.data.identifier;
-                        if (reg_map.get(reg_name)) |r| {
-                            target_expr = try alloc.create(hir.HirExpr);
-                            target_expr.* = .{
-                                .tag = .signal_ref,
-                                .hir_type = r.hir_type,
-                                .data = .{ .signal_ref = .{ .name = r.d_name } },
-                            };
-                        } else {
-                            target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                        }
-                    } else if (base.tag == .index) {
-                        const arr_target = base.data.index.target;
-                        const idx_e = try self.lowerExpr(alloc, base.data.index.index, reg_map, signal_types);
-                        if (arr_target.tag == .identifier and reg_map.get(arr_target.data.identifier) != null) {
-                            const r = reg_map.get(arr_target.data.identifier).?;
-                            const sub_target = try alloc.create(hir.HirExpr);
-                            sub_target.* = .{
-                                .tag = .signal_ref,
-                                .hir_type = r.hir_type,
-                                .data = .{ .signal_ref = .{ .name = r.d_name } },
-                            };
-                            target_expr = try alloc.create(hir.HirExpr);
-                            target_expr.* = .{
-                                .tag = .index,
-                                .hir_type = .{ .tag = .bits, .width = r.hir_type.elem_width },
-                                .data = .{ .index = .{ .target = sub_target, .index = idx_e } },
-                            };
-                        } else {
-                            target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                        }
-                    } else if (base.tag == .member_access) {
-                        const sub_base = base.data.member_access.target;
-                        const field_name = base.data.member_access.field;
-                        if (sub_base.tag == .identifier and reg_map.get(sub_base.data.identifier) != null) {
-                            const r = reg_map.get(sub_base.data.identifier).?;
-                            if (r.hir_type.tag == .tagged_union) {
-                                if (r.hir_type.getUnionField(field_name)) |uf| {
-                                    try self.lowerUnionFieldAssign(alloc, out_stmts, r.hir_type, uf, r.d_name, a.value, reg_map, signal_types);
-                                    return;
-                                }
-                            }
-                            if (r.hir_type.getStructField(field_name)) |f| {
-                                const sub_target = try alloc.create(hir.HirExpr);
-                                sub_target.* = .{
-                                    .tag = .signal_ref,
-                                    .hir_type = r.hir_type,
-                                    .data = .{ .signal_ref = .{ .name = r.d_name } },
-                                };
-                                target_expr = try alloc.create(hir.HirExpr);
-                                target_expr.* = .{
-                                    .tag = .slice,
-                                    .hir_type = .{ .tag = .bits, .width = f.width },
-                                    .data = .{
-                                        .slice = .{
-                                            .target = sub_target,
-                                            .start = f.offset,
-                                            .end = f.offset + f.width,
-                                            .is_downward = false,
-                                        },
-                                    },
-                                };
-                            } else {
-                                target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                            }
-                        } else {
-                            target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                        }
-                    } else {
-                        target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                    }
-                } else if (a.target.tag == .member_access) {
+                if (a.target.tag == .member_access) {
                     const ma = a.target.data.member_access;
                     const field_name = ma.field;
                     var base_id: ?[]const u8 = null;
@@ -3760,29 +3951,6 @@ pub const Elaborator = struct {
                                 return;
                             }
                         }
-                        if (r.hir_type.getStructField(field_name)) |f| {
-                            const sub_target = try alloc.create(hir.HirExpr);
-                            sub_target.* = .{
-                                .tag = .signal_ref,
-                                .hir_type = r.hir_type,
-                                .data = .{ .signal_ref = .{ .name = r.d_name } },
-                            };
-                            target_expr = try alloc.create(hir.HirExpr);
-                            target_expr.* = .{
-                                .tag = .slice,
-                                .hir_type = .{ .tag = .bits, .width = f.width },
-                                .data = .{
-                                    .slice = .{
-                                        .target = sub_target,
-                                        .start = f.offset,
-                                        .end = f.offset + f.width,
-                                        .is_downward = false,
-                                    },
-                                },
-                            };
-                        } else {
-                            target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                        }
                     } else if (base_id != null and signal_types.get(base_id.?) != null) {
                         const sig_t = signal_types.get(base_id.?).?;
                         if (sig_t.tag == .tagged_union) {
@@ -3791,82 +3959,10 @@ pub const Elaborator = struct {
                                 return;
                             }
                         }
-                        if (sig_t.getStructField(field_name)) |f| {
-                            const sub_target = try alloc.create(hir.HirExpr);
-                            sub_target.* = .{
-                                .tag = .signal_ref,
-                                .hir_type = sig_t,
-                                .data = .{ .signal_ref = .{ .name = base_id.? } },
-                            };
-                            target_expr = try alloc.create(hir.HirExpr);
-                            target_expr.* = .{
-                                .tag = .slice,
-                                .hir_type = .{ .tag = .bits, .width = f.width },
-                                .data = .{
-                                    .slice = .{
-                                        .target = sub_target,
-                                        .start = f.offset,
-                                        .end = f.offset + f.width,
-                                        .is_downward = false,
-                                    },
-                                },
-                            };
-                        } else {
-                            target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                        }
-                    } else {
-                        target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
                     }
-                } else if (a.target.tag == .index) {
-                    const base = a.target.data.index.target;
-                    const idx_e = try self.lowerExpr(alloc, a.target.data.index.index, reg_map, signal_types);
-                    if (base.tag == .member_access and std.mem.eql(u8, base.data.member_access.field, "next")) {
-                        const sub_base = base.data.member_access.target;
-                        if (sub_base.tag == .identifier and reg_map.get(sub_base.data.identifier) != null) {
-                            const r = reg_map.get(sub_base.data.identifier).?;
-                            const sub_target = try alloc.create(hir.HirExpr);
-                            sub_target.* = .{
-                                .tag = .signal_ref,
-                                .hir_type = r.hir_type,
-                                .data = .{ .signal_ref = .{ .name = r.d_name } },
-                            };
-                            target_expr = try alloc.create(hir.HirExpr);
-                            target_expr.* = .{
-                                .tag = .index,
-                                .hir_type = .{ .tag = .bits, .width = r.hir_type.elem_width },
-                                .data = .{ .index = .{ .target = sub_target, .index = idx_e } },
-                            };
-                        } else {
-                            target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                        }
-                    } else if (base.tag == .identifier and reg_map.get(base.data.identifier) != null) {
-                        const r = reg_map.get(base.data.identifier).?;
-                        const sub_target = try alloc.create(hir.HirExpr);
-                        sub_target.* = .{
-                            .tag = .signal_ref,
-                            .hir_type = r.hir_type,
-                            .data = .{ .signal_ref = .{ .name = r.d_name } },
-                        };
-                        target_expr = try alloc.create(hir.HirExpr);
-                        target_expr.* = .{
-                            .tag = .index,
-                            .hir_type = .{ .tag = .bits, .width = r.hir_type.elem_width },
-                            .data = .{ .index = .{ .target = sub_target, .index = idx_e } },
-                        };
-                    } else {
-                        target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
-                    }
-                } else if (a.target.tag == .identifier and reg_map.get(a.target.data.identifier) != null) {
-                    const r = reg_map.get(a.target.data.identifier).?;
-                    target_expr = try alloc.create(hir.HirExpr);
-                    target_expr.* = .{
-                        .tag = .signal_ref,
-                        .hir_type = r.hir_type,
-                        .data = .{ .signal_ref = .{ .name = r.d_name } },
-                    };
-                } else {
-                    target_expr = try self.lowerExpr(alloc, a.target, reg_map, signal_types);
                 }
+
+                const target_expr = try self.lowerTargetExpr(alloc, a.target, a.is_reg_assign, reg_map, signal_types);
 
                 var val_expr: *hir.HirExpr = undefined;
                 if (target_expr.hir_type.tag == .optional) {
@@ -3964,6 +4060,37 @@ pub const Elaborator = struct {
                         val_expr.data.unary.operand.hir_type.is_signed = true;
                     }
                 }
+                if (target_expr.hir_type.tag == .array) {
+                    if (val_expr.tag == .array_init) {
+                        for (val_expr.data.array_init.elements) |elem| {
+                            if (elem.tag == .lit and target_expr.hir_type.elem_width > 0) {
+                                elem.hir_type.width = target_expr.hir_type.elem_width;
+                            }
+                        }
+                    } else if (val_expr.tag == .lit and val_expr.data.lit.val == 0) {
+                        var zero_elems = try alloc.alloc(*hir.HirExpr, target_expr.hir_type.array_len);
+                        for (0..target_expr.hir_type.array_len) |zi| {
+                            const z_expr = try alloc.create(hir.HirExpr);
+                            z_expr.* = .{
+                                .tag = .lit,
+                                .hir_type = .{ .tag = .bits, .width = target_expr.hir_type.elem_width },
+                                .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                            };
+                            zero_elems[zi] = z_expr;
+                        }
+                        val_expr = try alloc.create(hir.HirExpr);
+                        val_expr.* = .{
+                            .tag = .array_init,
+                            .hir_type = target_expr.hir_type,
+                            .data = .{ .array_init = .{ .elements = zero_elems } },
+                        };
+                    }
+                }
+                if (target_expr.hir_type.tag != .array and val_expr.tag == .array_init) {
+                    const elems = val_expr.data.array_init.elements;
+                    val_expr.tag = .concat;
+                    val_expr.data = .{ .concat = .{ .args = elems } };
+                }
                 try out_stmts.append(.{
                     .tag = .assign,
                     .data = .{
@@ -4034,7 +4161,50 @@ pub const Elaborator = struct {
                     val.hir_type.width = h_type.width;
                 }
 
-                if (h_type.tag != .array) {
+                if (h_type.tag == .array) {
+                    if (val.tag == .array_init) {
+                        for (val.data.array_init.elements) |elem| {
+                            if (elem.tag == .lit and h_type.elem_width > 0) {
+                                elem.hir_type.width = h_type.elem_width;
+                            }
+                        }
+                        try out_stmts.append(.{
+                            .tag = .assign,
+                            .data = .{
+                                .assign = .{
+                                    .target = target,
+                                    .value = val,
+                                },
+                            },
+                        });
+                    } else if (val.tag == .lit and val.data.lit.val == 0) {
+                        var zero_elems = try alloc.alloc(*hir.HirExpr, h_type.array_len);
+                        for (0..h_type.array_len) |zi| {
+                            const z_expr = try alloc.create(hir.HirExpr);
+                            z_expr.* = .{
+                                .tag = .lit,
+                                .hir_type = .{ .tag = .bits, .width = h_type.elem_width },
+                                .data = .{ .lit = .{ .val = 0, .raw = "0" } },
+                            };
+                            zero_elems[zi] = z_expr;
+                        }
+                        const zero_arr = try alloc.create(hir.HirExpr);
+                        zero_arr.* = .{
+                            .tag = .array_init,
+                            .hir_type = h_type,
+                            .data = .{ .array_init = .{ .elements = zero_elems } },
+                        };
+                        try out_stmts.append(.{
+                            .tag = .assign,
+                            .data = .{
+                                .assign = .{
+                                    .target = target,
+                                    .value = zero_arr,
+                                },
+                            },
+                        });
+                    }
+                } else {
                     try out_stmts.append(.{
                         .tag = .assign,
                         .data = .{
@@ -4195,8 +4365,8 @@ pub const Elaborator = struct {
                                     } else {
                                         try vals.append(self.getEnumVal(p.data.enum_literal));
                                     }
-                                } else if (p.tag == .number) {
-                                    try vals.append(p.data.number.val);
+                                } else {
+                                    try vals.append(self.evalConstEx(p, null));
                                 }
                             }
                         }
@@ -4313,12 +4483,14 @@ pub const Elaborator = struct {
                     var branches = ArrayList(hir.HirCaseBranch).init(alloc);
                     for (sw.cases) |c| {
                         var vals = ArrayList(u64).init(alloc);
-                        for (c.patterns) |p| {
-                            if (p.tag == .number) {
-                                try vals.append(p.data.number.val);
-                            } else if (p.tag == .enum_literal) {
-                                // Enum literal: find value or assign index
-                                try vals.append(self.getEnumVal(p.data.enum_literal));
+                        if (!c.is_else) {
+                            for (c.patterns) |p| {
+                                if (p.tag == .enum_literal) {
+                                    // Enum literal: find value or assign index
+                                    try vals.append(self.getEnumVal(p.data.enum_literal));
+                                } else {
+                                    try vals.append(self.evalConstEx(p, null));
+                                }
                             }
                         }
 
@@ -4348,8 +4520,8 @@ pub const Elaborator = struct {
             .inline_for => {
                 // Comptime unrolling of loop
                 const loop = stmt.data.inline_for;
-                const start_val = if (loop.start.tag == .number) loop.start.data.number.val else 0;
-                const end_val = if (loop.end.tag == .number) loop.end.data.number.val else 0;
+                const start_val = self.evalConst(loop.start);
+                const end_val = self.evalConst(loop.end);
 
                 var idx = start_val;
                 while (idx < end_val) : (idx += 1) {
@@ -4598,9 +4770,14 @@ pub const Elaborator = struct {
             .unary => {
                 const u = expr.data.unary;
                 const operand = try self.lowerExpr(alloc, u.operand, reg_map, signal_types);
+                const is_1bit = (u.op == .bang or u.op == .pipe or u.op == .ampersand or u.op == .caret);
+                const res_type: hir.HirType = if (is_1bit)
+                    .{ .tag = .bits, .width = 1 }
+                else
+                    operand.hir_type;
                 h_expr.* = .{
                     .tag = .unary,
-                    .hir_type = operand.hir_type,
+                    .hir_type = res_type,
                     .data = .{
                         .unary = .{
                             .op = u.op,
@@ -4638,6 +4815,24 @@ pub const Elaborator = struct {
                     },
                 };
             },
+            .part_select => {
+                const ps = expr.data.part_select;
+                const target = try self.lowerExpr(alloc, ps.target, reg_map, signal_types);
+                const base = try self.lowerExpr(alloc, ps.base, reg_map, signal_types);
+                const w: u32 = @intCast(self.evalConst(ps.width));
+                h_expr.* = .{
+                    .tag = .part_select,
+                    .hir_type = .{ .tag = .bits, .width = w },
+                    .data = .{
+                        .part_select = .{
+                            .target = target,
+                            .base = base,
+                            .width = w,
+                            .is_up = ps.is_up,
+                        },
+                    },
+                };
+            },
             .index => {
                 const idx = expr.data.index;
                 const target = try self.lowerExpr(alloc, idx.target, reg_map, signal_types);
@@ -4657,6 +4852,80 @@ pub const Elaborator = struct {
             .builtin_call => {
                 const bc = expr.data.builtin_call;
                 switch (bc.tag) {
+                    .builtin_replicate => {
+                        const count = self.evalConst(bc.args[0]);
+                        const val = try self.lowerExpr(alloc, bc.args[1], reg_map, signal_types);
+                        if (val.tag == .lit and std.mem.indexOfScalar(u8, val.data.lit.raw, '\'') == null) {
+                            val.hir_type.width = 1;
+                        }
+                        const total_w: u32 = @intCast(count * @as(u64, val.hir_type.width));
+                        h_expr.* = .{
+                            .tag = .replicate,
+                            .hir_type = .{ .tag = .bits, .width = total_w },
+                            .data = .{
+                                .replicate = .{
+                                    .count = @intCast(count),
+                                    .val = val,
+                                },
+                            },
+                        };
+                    },
+                    .builtin_reduce_or => {
+                        const operand = try self.lowerExpr(alloc, bc.args[0], reg_map, signal_types);
+                        h_expr.* = .{
+                            .tag = .unary,
+                            .hir_type = .{ .tag = .bits, .width = 1 },
+                            .data = .{
+                                .unary = .{
+                                    .op = .pipe,
+                                    .operand = operand,
+                                },
+                            },
+                        };
+                    },
+                    .builtin_reduce_and => {
+                        const operand = try self.lowerExpr(alloc, bc.args[0], reg_map, signal_types);
+                        h_expr.* = .{
+                            .tag = .unary,
+                            .hir_type = .{ .tag = .bits, .width = 1 },
+                            .data = .{
+                                .unary = .{
+                                    .op = .ampersand,
+                                    .operand = operand,
+                                },
+                            },
+                        };
+                    },
+                    .builtin_reduce_xor => {
+                        const operand = try self.lowerExpr(alloc, bc.args[0], reg_map, signal_types);
+                        h_expr.* = .{
+                            .tag = .unary,
+                            .hir_type = .{ .tag = .bits, .width = 1 },
+                            .data = .{
+                                .unary = .{
+                                    .op = .caret,
+                                    .operand = operand,
+                                },
+                            },
+                        };
+                    },
+                    .builtin_part_select => {
+                        const target = try self.lowerExpr(alloc, bc.args[0], reg_map, signal_types);
+                        const base = try self.lowerExpr(alloc, bc.args[1], reg_map, signal_types);
+                        const w: u32 = @intCast(self.evalConst(bc.args[2]));
+                        h_expr.* = .{
+                            .tag = .part_select,
+                            .hir_type = .{ .tag = .bits, .width = w },
+                            .data = .{
+                                .part_select = .{
+                                    .target = target,
+                                    .base = base,
+                                    .width = w,
+                                    .is_up = true,
+                                },
+                            },
+                        };
+                    },
                     .builtin_bit_reverse => {
                         const target = try self.lowerExpr(alloc, bc.args[0], reg_map, signal_types);
                         h_expr.* = .{
@@ -4765,7 +5034,15 @@ pub const Elaborator = struct {
                                 } else {
                                     sub.hir_type.width = target_w;
                                 }
-                                h_expr.* = sub.*;
+                                if (is_signed_cast and sub.tag != .lit) {
+                                    h_expr.* = .{
+                                        .tag = .signed_cast,
+                                        .hir_type = effective_type,
+                                        .data = .{ .signed_cast = .{ .target = sub } },
+                                    };
+                                } else {
+                                    h_expr.* = sub.*;
+                                }
                             }
                         } else {
                             const sub = try self.lowerExpr(alloc, bc.args[0], reg_map, signal_types);
@@ -4987,6 +5264,44 @@ pub const Elaborator = struct {
                         .data = .{ .concat = .{ .args = try concat_args.toOwnedSlice() } },
                     };
                 }
+            },
+            .array_init => {
+                const ai = expr.data.array_init;
+                var resolved_type: ?hir.HirType = null;
+                if (ai.type_expr) |te| {
+                    resolved_type = try self.lowerType(te);
+                }
+
+                var elem_w: u32 = if (resolved_type) |rt| (if (rt.tag == .array) rt.elem_width else rt.width) else 0;
+                var lowered_elems = ArrayList(*hir.HirExpr).init(alloc);
+
+                for (ai.elements) |elem| {
+                    const lowered_e = try self.lowerExpr(alloc, elem, reg_map, signal_types);
+                    if (lowered_e.tag == .lit and elem_w > 0) {
+                        lowered_e.hir_type.width = elem_w;
+                    } else if (elem_w == 0 and lowered_e.hir_type.width > 0) {
+                        elem_w = lowered_e.hir_type.width;
+                    }
+                    try lowered_elems.append(lowered_e);
+                }
+
+                const total_len: u32 = @intCast(ai.elements.len);
+                const final_type: hir.HirType = if (resolved_type) |rt| rt else .{
+                    .tag = .array,
+                    .width = elem_w * total_len,
+                    .elem_width = elem_w,
+                    .array_len = total_len,
+                };
+
+                h_expr.* = .{
+                    .tag = .array_init,
+                    .hir_type = final_type,
+                    .data = .{
+                        .array_init = .{
+                            .elements = try lowered_elems.toOwnedSlice(),
+                        },
+                    },
+                };
             },
             .call => {
                 const c = expr.data.call;
@@ -5363,26 +5678,14 @@ pub const Elaborator = struct {
         }
     }
 
-    fn getAstTargetBaseName(target: *const ast.Expr) ?[]const u8 {
-        switch (target.tag) {
-            .identifier => return target.data.identifier,
-            .member_access => {
-                if (std.mem.eql(u8, target.data.member_access.field, "next")) {
-                    return getAstTargetBaseName(target.data.member_access.target);
-                }
-                return getAstTargetBaseName(target.data.member_access.target);
-            },
-            .index => return getAstTargetBaseName(target.data.index.target),
-            .slice => return getAstTargetBaseName(target.data.slice.target),
-            else => return null,
-        }
-    }
-
     fn collectTargetsFromAstStatements(stmts: []const ast.Statement, out_targets: *std.StringHashMap(void)) !void {
         for (stmts) |stmt| {
             switch (stmt.tag) {
                 .assign => {
-                    if (getAstTargetBaseName(stmt.data.assign.target)) |name| {
+                    var names = ArrayList([]const u8).init(out_targets.allocator);
+                    defer names.deinit();
+                    try collectAstTargetBaseNames(stmt.data.assign.target, &names);
+                    for (names.items) |name| {
                         try out_targets.put(name, {});
                     }
                 },
@@ -5418,6 +5721,7 @@ pub const Elaborator = struct {
         reg_map: *const std.StringHashMap(hir.HirRegister),
         module_ports: *const std.StringHashMap([]hir.HirPort),
     ) !void {
+        _ = reg_map;
         var drivers = std.StringHashMap(DriverInfo).init(alloc);
         var input_ports = std.StringHashMap(void).init(alloc);
 
@@ -5509,7 +5813,6 @@ pub const Elaborator = struct {
         var top_it = top_level_written.keyIterator();
         while (top_it.next()) |k| {
             const target_name = k.*;
-            const is_reg = (reg_map.get(target_name) != null);
 
             if (input_ports.contains(target_name)) {
                 std.debug.print(
@@ -5529,10 +5832,7 @@ pub const Elaborator = struct {
             }
 
             if (drivers.get(target_name)) |existing| {
-                const target_label = if (is_reg)
-                    try std.fmt.allocPrint(alloc, "{s}.next", .{target_name})
-                else
-                    target_name;
+                const target_label = target_name;
 
                 std.debug.print(
                     \\
@@ -5550,10 +5850,7 @@ pub const Elaborator = struct {
                     , .{ target_label, mod_name, target_label, existing.desc, target_label });
                 return error.MultipleDrivers;
             } else {
-                const target_label = if (is_reg)
-                    try std.fmt.allocPrint(alloc, "{s}.next", .{target_name})
-                else
-                    target_name;
+                const target_label = target_name;
                 const desc = try std.fmt.allocPrint(alloc, "top-level module statement on '{s}'", .{target_label});
                 try drivers.put(target_name, .{
                     .kind = .comb_block,
@@ -5576,7 +5873,6 @@ pub const Elaborator = struct {
                 var it = comb_written.keyIterator();
                 while (it.next()) |k| {
                     const target_name = k.*;
-                    const is_reg = (reg_map.get(target_name) != null);
 
                     if (input_ports.contains(target_name)) {
                         std.debug.print(
@@ -5599,10 +5895,7 @@ pub const Elaborator = struct {
                         if (existing.kind == .submodule_output or existing.kind == .continuous_wire or
                             (existing.kind == .comb_block and existing.comb_block_idx != null and existing.comb_block_idx.? != current_idx))
                         {
-                            const target_label = if (is_reg)
-                                try std.fmt.allocPrint(alloc, "{s}.next", .{target_name})
-                            else
-                                target_name;
+                            const target_label = target_name;
 
                             std.debug.print(
                                 \\
@@ -5621,10 +5914,7 @@ pub const Elaborator = struct {
                             return error.MultipleDrivers;
                         }
                     } else {
-                        const target_label = if (is_reg)
-                            try std.fmt.allocPrint(alloc, "{s}.next", .{target_name})
-                        else
-                            target_name;
+                        const target_label = target_name;
                         const desc = try std.fmt.allocPrint(alloc, "procedural assignment to '{s}' in comb block #{d}", .{ target_label, current_idx });
                         try drivers.put(target_name, .{
                             .kind = .comb_block,
@@ -5676,6 +5966,21 @@ pub const Elaborator = struct {
                 try collectExprSignals(expr.data.mux.then_expr, out_signals);
                 try collectExprSignals(expr.data.mux.else_expr, out_signals);
             },
+            .array_init => {
+                for (expr.data.array_init.elements) |elem| {
+                    try collectExprSignals(elem, out_signals);
+                }
+            },
+            .replicate => {
+                try collectExprSignals(expr.data.replicate.val, out_signals);
+            },
+            .part_select => {
+                try collectExprSignals(expr.data.part_select.target, out_signals);
+                try collectExprSignals(expr.data.part_select.base, out_signals);
+            },
+            .signed_cast => {
+                try collectExprSignals(expr.data.signed_cast.target, out_signals);
+            },
         }
     }
 
@@ -5688,40 +5993,46 @@ pub const Elaborator = struct {
     ) anyerror!void {
         switch (stmt.tag) {
             .assign => {
-                const target_name = getHirTargetBaseName(stmt.data.assign.target) orelse return;
-                if (!comb_signals.contains(target_name)) return;
+                var targets = ArrayList([]const u8).init(alloc);
+                defer targets.deinit();
+                try collectHirTargetBaseNames(stmt.data.assign.target, &targets);
 
                 var sources = ArrayList([]const u8).init(alloc);
+                defer sources.deinit();
                 try collectExprSignals(stmt.data.assign.value, &sources);
 
-                var adj = graph.getPtr(target_name) orelse return;
+                for (targets.items) |target_name| {
+                    if (!comb_signals.contains(target_name)) continue;
 
-                for (sources.items) |s| {
-                    if (comb_signals.contains(s)) {
-                        var already = false;
-                        for (adj.items) |existing| {
-                            if (std.mem.eql(u8, existing, s)) {
-                                already = true;
-                                break;
+                    var adj = graph.getPtr(target_name) orelse continue;
+
+                    for (sources.items) |s| {
+                        if (comb_signals.contains(s)) {
+                            var already = false;
+                            for (adj.items) |existing| {
+                                if (std.mem.eql(u8, existing, s)) {
+                                    already = true;
+                                    break;
+                                }
                             }
-                        }
-                        if (!already) {
-                            try adj.append(s);
+                            if (!already) {
+                                try adj.append(s);
+                            }
                         }
                     }
-                }
 
-                for (cond_sources.items) |cs| {
-                    if (comb_signals.contains(cs)) {
-                        var already = false;
-                        for (adj.items) |existing| {
-                            if (std.mem.eql(u8, existing, cs)) {
-                                already = true;
-                                break;
+                    for (cond_sources.items) |cs| {
+                        if (comb_signals.contains(cs)) {
+                            var already = false;
+                            for (adj.items) |existing| {
+                                if (std.mem.eql(u8, existing, cs)) {
+                                    already = true;
+                                    break;
+                                }
                             }
-                        }
-                        if (!already) {
-                            try adj.append(cs);
+                            if (!already) {
+                                try adj.append(cs);
+                            }
                         }
                     }
                 }
@@ -5822,7 +6133,7 @@ pub const Elaborator = struct {
                         \\  Break the combinational cycle by declaring a clocked register:
                         \\    reg {s}: ... = 0;
                         \\    comb {{
-                        \\        {s}.next = ...;
+                        \\        {s} := ...;
                         \\    }}
                         \\======================================================================
                         \\
@@ -6001,8 +6312,11 @@ pub const Elaborator = struct {
                 }
                 // Verify all signals read in RHS are already written
                 try self.verifyExprReadSafety(a.value, written, comb_signals, mod_name);
-                // Now mark target as written
-                if (getHirTargetBaseName(a.target)) |target_name| {
+                // Now mark all target signals as written
+                var targets = ArrayList([]const u8).init(alloc);
+                defer targets.deinit();
+                try collectHirTargetBaseNames(a.target, &targets);
+                for (targets.items) |target_name| {
                     try written.put(target_name, {});
                 }
             },
@@ -6145,6 +6459,21 @@ pub const Elaborator = struct {
                 try self.verifyExprReadSafety(expr.data.mux.then_expr, written, comb_signals, mod_name);
                 try self.verifyExprReadSafety(expr.data.mux.else_expr, written, comb_signals, mod_name);
             },
+            .array_init => {
+                for (expr.data.array_init.elements) |elem| {
+                    try self.verifyExprReadSafety(elem, written, comb_signals, mod_name);
+                }
+            },
+            .replicate => {
+                try self.verifyExprReadSafety(expr.data.replicate.val, written, comb_signals, mod_name);
+            },
+            .part_select => {
+                try self.verifyExprReadSafety(expr.data.part_select.target, written, comb_signals, mod_name);
+                try self.verifyExprReadSafety(expr.data.part_select.base, written, comb_signals, mod_name);
+            },
+            .signed_cast => {
+                try self.verifyExprReadSafety(expr.data.signed_cast.target, written, comb_signals, mod_name);
+            },
             else => {},
         }
     }
@@ -6157,40 +6486,45 @@ pub const Elaborator = struct {
     ) anyerror!void {
         switch (stmt.tag) {
             .assign => {
-                const target_name = getHirTargetBaseName(stmt.data.assign.target) orelse return;
+                var targets = ArrayList([]const u8).init(alloc);
+                defer targets.deinit();
+                try collectHirTargetBaseNames(stmt.data.assign.target, &targets);
 
                 var sources = ArrayList([]const u8).init(alloc);
+                defer sources.deinit();
                 try collectExprSignals(stmt.data.assign.value, &sources);
 
-                const gop = try dep_graph.getOrPut(target_name);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = ArrayList([]const u8).init(alloc);
-                }
-                var adj = gop.value_ptr;
+                for (targets.items) |target_name| {
+                    const gop = try dep_graph.getOrPut(target_name);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = ArrayList([]const u8).init(alloc);
+                    }
+                    var adj = gop.value_ptr;
 
-                for (sources.items) |s| {
-                    var already = false;
-                    for (adj.items) |existing| {
-                        if (std.mem.eql(u8, existing, s)) {
-                            already = true;
-                            break;
+                    for (sources.items) |s| {
+                        var already = false;
+                        for (adj.items) |existing| {
+                            if (std.mem.eql(u8, existing, s)) {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if (!already) {
+                            try adj.append(s);
                         }
                     }
-                    if (!already) {
-                        try adj.append(s);
-                    }
-                }
 
-                for (cond_sources.items) |cs| {
-                    var already = false;
-                    for (adj.items) |existing| {
-                        if (std.mem.eql(u8, existing, cs)) {
-                            already = true;
-                            break;
+                    for (cond_sources.items) |cs| {
+                        var already = false;
+                        for (adj.items) |existing| {
+                            if (std.mem.eql(u8, existing, cs)) {
+                                already = true;
+                                break;
+                            }
                         }
-                    }
-                    if (!already) {
-                        try adj.append(cs);
+                        if (!already) {
+                            try adj.append(cs);
+                        }
                     }
                 }
             },
@@ -6434,17 +6768,41 @@ pub const Elaborator = struct {
                 const u = expr.data.unary;
                 const op_val = self.evalConstEx(u.operand, local_consts);
                 return switch (u.op) {
-                    .tilde, .bang => ~op_val,
+                    .tilde => ~op_val,
+                    .bang => if (op_val == 0) 1 else 0,
                     .minus => (~op_val) +% 1,
+                    .pipe => if (op_val != 0) 1 else 0,
+                    .ampersand => if (op_val != 0 and (op_val & (op_val + 1)) == 0) 1 else 0,
+                    .caret => @popCount(op_val) & 1,
                     else => op_val,
                 };
             },
             .builtin_call => {
                 const bc = expr.data.builtin_call;
+                if (bc.tag == .builtin_as and bc.args.len >= 2) {
+                    return self.evalConstEx(bc.args[1], local_consts);
+                }
                 if (bc.tag == .builtin_clog2 and bc.args.len > 0) {
                     const arg_val = self.evalConstEx(bc.args[0], local_consts);
                     if (arg_val <= 1) return 1;
                     return 64 - @clz(arg_val - 1);
+                }
+                if (bc.tag == .builtin_replicate and bc.args.len >= 2) {
+                    const count = self.evalConstEx(bc.args[0], local_consts);
+                    const val = self.evalConstEx(bc.args[1], local_consts);
+                    var res: u64 = 0;
+                    for (0..@intCast(count)) |_| {
+                        res = (res << 1) | (val & 1);
+                    }
+                    return res;
+                }
+                if (bc.tag == .builtin_reduce_or and bc.args.len > 0) {
+                    const val = self.evalConstEx(bc.args[0], local_consts);
+                    return if (val != 0) 1 else 0;
+                }
+                if (bc.tag == .builtin_reduce_xor and bc.args.len > 0) {
+                    const val = self.evalConstEx(bc.args[0], local_consts);
+                    return @popCount(val) & 1;
                 }
                 return 0;
             },

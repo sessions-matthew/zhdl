@@ -46,6 +46,7 @@ pub module Am335xTimer {
         // SoftReset trigger: bit 0 of TIOCP_CFG write
         wire soft_reset_trigger: u1 = (cs && wr_en && (addr == 0x10) && (wdata[0] == 1));
 
+    comb {
         // Bus ready and interrupt generation
         rdy = cs && (rd_en || wr_en);
         irq_out = ((irqstatus_raw & irqenable) != 0);
@@ -175,6 +176,7 @@ pub module Am335xTimer {
             }
         }
     }
+}
 
 test "Am335xTimer OCP bus, compare match IRQ, and soft reset" {
     wire clk: clock;

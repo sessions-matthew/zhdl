@@ -488,6 +488,9 @@ pub const SystemVerilogEmitter = struct {
                     .bang => "!",
                     .tilde => "~",
                     .minus => "-",
+                    .pipe => "|",
+                    .ampersand => "&",
+                    .caret => "^",
                     else => "",
                 };
                 try writer.print("{s}(", .{op_str});
@@ -506,7 +509,7 @@ pub const SystemVerilogEmitter = struct {
                     .pipe => "|",
                     .caret => "^",
                     .shl => "<<",
-                    .shr => ">>",
+                    .shr => if (b.left.hir_type.is_signed) ">>>" else ">>",
                     .equal_equal => "==",
                     .bang_equal => "!=",
                     .less_than => "<",
@@ -531,6 +534,35 @@ pub const SystemVerilogEmitter = struct {
                 try self.emitExpr(m.then_expr, writer);
                 try writer.writeAll(" : ");
                 try self.emitExpr(m.else_expr, writer);
+                try writer.writeAll(")");
+            },
+            .array_init => {
+                try writer.writeAll("'{");
+                for (expr.data.array_init.elements, 0..) |arg, i| {
+                    const comma = if (i == expr.data.array_init.elements.len - 1) "" else ", ";
+                    try self.emitExpr(arg, writer);
+                    try writer.writeAll(comma);
+                }
+                try writer.writeAll("}");
+            },
+            .replicate => {
+                try writer.print("{{{d}{{", .{expr.data.replicate.count});
+                try self.emitExpr(expr.data.replicate.val, writer);
+                try writer.writeAll("}}");
+            },
+            .part_select => {
+                try self.emitExpr(expr.data.part_select.target, writer);
+                try writer.writeAll("[");
+                try self.emitExpr(expr.data.part_select.base, writer);
+                if (expr.data.part_select.is_up) {
+                    try writer.print(" +: {d}]", .{expr.data.part_select.width});
+                } else {
+                    try writer.print(" -: {d}]", .{expr.data.part_select.width});
+                }
+            },
+            .signed_cast => {
+                try writer.writeAll("$signed(");
+                try self.emitExpr(expr.data.signed_cast.target, writer);
                 try writer.writeAll(")");
             },
         }
@@ -704,7 +736,19 @@ pub const SystemVerilogEmitter = struct {
                     try self.emitExpr(as.cond, writer);
                     try writer.writeAll(")) begin\n");
                     if (as.msg) |msg| {
-                        try writer.print("            $error(\"[FAIL] {s}\");\n", .{msg});
+                        try writer.writeAll("            $error(\"[FAIL] ");
+                        for (msg) |c| {
+                            if (c == '%') {
+                                try writer.writeAll("%%");
+                            } else if (c == '"') {
+                                try writer.writeAll("\\\"");
+                            } else if (c == '\\') {
+                                try writer.writeAll("\\\\");
+                            } else {
+                                try writer.writeByte(c);
+                            }
+                        }
+                        try writer.writeAll("\");\n");
                     } else {
                         try writer.print("            $error(\"[FAIL] Assertion failed in test '{s}'\");\n", .{tb.name});
                     }

@@ -50,14 +50,6 @@ pub const HirType = struct {
     tag_width: u32 = 0,
     array_len: u32 = 0,
 
-    pub fn isClock(self: HirType) bool {
-        return self.tag == .clock;
-    }
-
-    pub fn isReset(self: HirType) bool {
-        return self.tag == .reset;
-    }
-
     pub fn getStructField(self: HirType, field_name: []const u8) ?HirStructField {
         for (self.struct_fields) |f| {
             if (std.mem.eql(u8, f.name, field_name)) return f;
@@ -68,13 +60,6 @@ pub const HirType = struct {
     pub fn getUnionField(self: HirType, field_name: []const u8) ?HirUnionField {
         for (self.union_fields) |f| {
             if (std.mem.eql(u8, f.name, field_name)) return f;
-        }
-        return null;
-    }
-
-    pub fn getUnionFieldByTag(self: HirType, tag_val: u64) ?HirUnionField {
-        for (self.union_fields) |f| {
-            if (f.tag_value == tag_val) return f;
         }
         return null;
     }
@@ -92,6 +77,10 @@ pub const HirExprTag = enum {
     unary,
     binary,
     mux,
+    array_init,
+    replicate,
+    part_select,
+    signed_cast,
 };
 
 pub const HirExpr = struct {
@@ -141,6 +130,22 @@ pub const HirExpr = struct {
             cond: *HirExpr,
             then_expr: *HirExpr,
             else_expr: *HirExpr,
+        },
+        array_init: struct {
+            elements: []*HirExpr,
+        },
+        replicate: struct {
+            count: u32,
+            val: *HirExpr,
+        },
+        part_select: struct {
+            target: *HirExpr,
+            base: *HirExpr,
+            width: u32,
+            is_up: bool,
+        },
+        signed_cast: struct {
+            target: *HirExpr,
         },
     },
 };

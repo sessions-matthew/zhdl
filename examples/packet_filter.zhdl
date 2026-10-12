@@ -21,22 +21,24 @@ pub module PacketFilter(comptime W: usize) {
 
     reg active_header: ?PacketHeader = null;
 
-    switch (cmd) {
-        .ping => |echo| {
-            rx_stream = echo; // Auto-wraps payload into valid/data stream
-        },
-        .data => |hdr| {
-            if (hdr.isNull()) {
-                active_header := null; // Clears optional register
+    comb {
+        switch (cmd) {
+            .ping => |echo| {
+                rx_stream = echo; // Auto-wraps payload into valid/data stream
+            },
+            .data => |hdr| {
+                if (hdr.isNull()) {
+                    active_header := null; // Clears optional register
+                    rx_stream = null;
+                } else {
+                    active_header := hdr; // ':=' schedules 1-cycle flop update
+                    rx_stream = hdr.len[7:0];
+                }
+            },
+            .idle => {
                 rx_stream = null;
-            } else {
-                active_header := hdr;  // ':=' schedules 1-cycle flop update
-                rx_stream = hdr.len[7:0];
-            }
-        },
-        .idle => {
-            rx_stream = null;
-        },
+            },
+        }
     }
 }
 

@@ -92,60 +92,62 @@ pub module RiscvDecoder {
     wire b_fmt: BType = @bitCast(BType, instr);
 
     wire op: DecodedOp;
-    op = DecodedOp{ .illegal = 0 };
+    comb {
+        op = DecodedOp{ .illegal = 0 };
 
-    switch (opcode) {
-        7'b0110011 => { // OP (register-register ALU: ADD, SUB, etc.)
-            op = DecodedOp{ .alu_reg = r_fmt };
-        },
-        7'b0010011 => { // OP-IMM (ADDI, etc.)
-            op = DecodedOp{ .alu_imm = i_fmt };
-        },
-        7'b0110111 => { // LUI
-            op = DecodedOp{ .lui = u_fmt };
-        },
-        7'b1100011 => { // BRANCH (BEQ, BNE, etc.)
-            op = DecodedOp{ .branch = b_fmt };
-        },
-        else => {
-            op = DecodedOp{ .illegal = 0 };
-        },
-    }
+        switch (opcode) {
+            7'b0110011 => { // OP (register-register ALU: ADD, SUB, etc.)
+                op = DecodedOp{ .alu_reg = r_fmt };
+            },
+            7'b0010011 => { // OP-IMM (ADDI, etc.)
+                op = DecodedOp{ .alu_imm = i_fmt };
+            },
+            7'b0110111 => { // LUI
+                op = DecodedOp{ .lui = u_fmt };
+            },
+            7'b1100011 => { // BRANCH (BEQ, BNE, etc.)
+                op = DecodedOp{ .branch = b_fmt };
+            },
+            else => {
+                op = DecodedOp{ .illegal = 0 };
+            },
+        }
 
-    // Execution stage
-    wb_en = 0;
-    wb_rd = 0;
-    wb_data = 0;
-    branch_taken = 0;
-    next_pc = pc +% 4;
+        // Execution stage
+        wb_en = 0;
+        wb_rd = 0;
+        wb_data = 0;
+        branch_taken = 0;
+        next_pc = pc +% 4;
 
-    switch (op) {
-        .alu_reg => |r| {
-            wb_en = (r.rd != 0);
-            wb_rd = r.rd;
-            if (r.isSub()) {
-                wb_data = rs1_data -% rs2_data;
-            } else {
-                wb_data = rs1_data +% rs2_data;
-            }
-        },
-        .alu_imm => |i| {
-            wb_en = (i.rd != 0);
-            wb_rd = i.rd;
-            wb_data = rs1_data +% i.getSignExtendedImm();
-        },
-        .lui => |u_val| {
-            wb_en = (u_val.rd != 0);
-            wb_rd = u_val.rd;
-            wb_data = u_val.getLuiVal();
-        },
-        .branch => |b| {
-            if (rs1_data == rs2_data) {
-                branch_taken = 1;
-                next_pc = pc +% b.getBranchOffset();
-            }
-        },
-        .illegal => {},
+        switch (op) {
+            .alu_reg => |r| {
+                wb_en = (r.rd != 0);
+                wb_rd = r.rd;
+                if (r.isSub()) {
+                    wb_data = rs1_data -% rs2_data;
+                } else {
+                    wb_data = rs1_data +% rs2_data;
+                }
+            },
+            .alu_imm => |i| {
+                wb_en = (i.rd != 0);
+                wb_rd = i.rd;
+                wb_data = rs1_data +% i.getSignExtendedImm();
+            },
+            .lui => |u_val| {
+                wb_en = (u_val.rd != 0);
+                wb_rd = u_val.rd;
+                wb_data = u_val.getLuiVal();
+            },
+            .branch => |b| {
+                if (rs1_data == rs2_data) {
+                    branch_taken = 1;
+                    next_pc = pc +% b.getBranchOffset();
+                }
+            },
+            .illegal => {},
+        }
     }
 }
 

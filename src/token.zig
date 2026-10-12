@@ -58,6 +58,11 @@ pub const TokenType = enum {
     // Builtins (starting with '@')
     builtin_import,
     builtin_concat,
+    builtin_replicate,
+    builtin_reduce_or,
+    builtin_reduce_and,
+    builtin_reduce_xor,
+    builtin_part_select,
     builtin_bit_reverse,
     builtin_byte_swap,
     builtin_truncate,
@@ -74,6 +79,8 @@ pub const TokenType = enum {
     dot_dot, // ..
     question_mark, // ?
     colon, // :
+    plus_colon, // +:
+    minus_colon, // -:
     semicolon, // ;
     comma, // ,
 
@@ -119,22 +126,6 @@ pub const Token = struct {
     tag: TokenType,
     loc: SourceLoc,
     slice: []const u8,
-
-    pub fn format(
-        self: Token,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("{s}('{s}') at {d}:{d}", .{
-            @tagName(self.tag),
-            self.slice,
-            self.loc.line,
-            self.loc.col,
-        });
-    }
 };
 
 pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
@@ -176,6 +167,11 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
 pub const builtins = std.StaticStringMap(TokenType).initComptime(.{
     .{ "@import", .builtin_import },
     .{ "@concat", .builtin_concat },
+    .{ "@replicate", .builtin_replicate },
+    .{ "@reduceOr", .builtin_reduce_or },
+    .{ "@reduceAnd", .builtin_reduce_and },
+    .{ "@reduceXor", .builtin_reduce_xor },
+    .{ "@partSelect", .builtin_part_select },
     .{ "@bitReverse", .builtin_bit_reverse },
     .{ "@byteSwap", .builtin_byte_swap },
     .{ "@truncate", .builtin_truncate },

@@ -31,8 +31,7 @@ This document serves as the formal language specification and reference guide fo
    - [Register Declarations (`reg`)](#44-register-declarations-reg)
 5. [Procedural Blocks & Execution Semantics](#5-procedural-blocks--execution-semantics)
    - [Combinational Blocks (`comb`)](#51-combinational-blocks-comb)
-   - [Register Updates (`reg.next`)](#52-register-updates-regnext)
-   - [Synchronous Blocks (`sync`)](#53-synchronous-blocks-sync)
+   - [Register Updates (`:=`)](#52-register-updates-)
 6. [Expressions, Operators & Slicing](#6-expressions-operators--slicing)
    - [Operators and Precedence](#61-operators-and-precedence)
    - [Wrapping vs Saturating Arithmetic](#62-wrapping-vs-saturating-arithmetic)
@@ -72,7 +71,7 @@ This document serves as the formal language specification and reference guide fo
 
 ZHdl is designed to eliminate classic hardware bugs directly at compile time:
 
-1. **No Inferred Latches**: Combinational logic cannot accidentally retain state. Register architectures enforce explicit next-state updates (`reg.next`) with automatic default holds.
+1. **No Inferred Latches**: Combinational logic cannot accidentally retain state. Register architectures enforce explicit next-state updates (`:=`) with automatic default holds.
 2. **Deterministic Concurrency (Single-Writer Rule)**: Multiple concurrent drivers on the same wire or port contention are rejected during semantic elaboration.
 3. **No Parasitic Combinational Loops**: Zero-delay feedback paths ($a \to b \to a$) are detected via 3-color directed acyclic graph (DAG) cycle checks and rejected before synthesis.
 4. **Metastability-Proof Clock Domain Crossings**: Asynchronous transfers between differing clock domains ($R_{\text{src}}\text{.clk} \neq R_{\text{dest}}\text{.clk}$) are rejected unless explicitly routed through dual flip-flop synchronizers (`@sync2ff`).
@@ -457,15 +456,17 @@ reg count: u8 = 0; // Inferred to bind to default 'clk' and 'rst' ports
 
 Registers automatically split into:
 - `count_q`: Stable output of the flip-flop (read in combinational expressions).
-- `count_d`: Combinational input driving the next clock cycle state (assigned via `count.next`).
+- `count_d`: Combinational input driving the next clock cycle state (assigned via `count := ...` in `comb`).
 
 ---
 
 ## 5. Procedural Blocks & Execution Semantics
 
-### 5.1 Procedural Execution & Optional `comb` Blocks
+### 5.1 Declarative Module Scope & Explicit `comb` Blocks
 
-ZHdl supports **flat, boilerplate-free module bodies**: dedicated `comb { ... }` wrappers are **completely optional**. Statements, assignments, conditionals, and control flow can be written directly at the module top level:
+ZHdl enforces "The One Obvious Way" to structure hardware modules:
+- **Module Scope is Strictly Declarative**: Port declarations (`in`, `out`), continuous wire declarations (`wire w: u8 = ...;`), constants (`const`), sub-module instantiations (`Sub.instantiate(...)`), and clocked register declarations (`reg`) reside directly at module scope.
+- **Procedural Logic Requires Explicit `comb { ... }`**: All procedural statements, control flow (`if`, `switch`, loops), and register state updates must be enclosed in explicit `comb` blocks. Bare anonymous blocks `{ ... }`, floating control flow statements, or module-level register assignments are rejected at compile time.
 
 ```zig
 pub module Counter {
@@ -476,68 +477,85 @@ pub module Counter {
 
     reg r_count: u8 = 0;
 
-    // Flat procedural statements (no comb { ... } wrapper required!)
-    if (en) {
-        r_count := r_count +% 1;
-    }
+    // Declarative wire continuous assignment
     count = r_count;
+
+    // Explicit combinational & register-update procedural block
+    comb {
+        if (en) {
+            r_count := r_count +% 1;
+        }
+    }
 }
 ```
 
-For backward compatibility and local lexical scoping, explicit `comb { ... }` blocks and anonymous `{ ... }` blocks are fully supported and lower into the same unified evaluation domain.
-
 #### Race-Condition & Hazard Prevention Guarantees:
-When writing top-level procedural statements, the compiler statically prevents simulation/synthesis hazards:
-1. **Unified Behavioral Domain**: All top-level logic and blocks merge into **exactly one** SystemVerilog `always_comb` process, completely eliminating simulator delta-cycle event races.
+1. **Unified Behavioral Domain**: All procedural logic inside `comb` blocks lowers into SystemVerilog `always_comb` processes, completely eliminating simulator delta-cycle event races.
 2. **Static Read-Before-Write Verification**: Reading a combinational wire before it has been assigned in the procedural stream is rejected at compile time with `COMPILE ERROR: Read-Before-Write Hazard on Signal '...'`. Clocked registers (`reg`) read their stable previous-cycle output $Q$ and are always safe to read anywhere.
-3. **Strict Operator Discipline (`:=` vs `=`)**: The compiler strictly reserves `:=` for registers (`always_ff` non-blocking) and `=` for wires (`always_comb` blocking).
-4. **Single-Writer Rule**: Multiple drivers on the same wire across top-level statements, continuous wires, or blocks are rejected before code emission.
+3. **Strict Operator Discipline (`:=` vs `=`)**: The compiler strictly reserves `:=` for registers (`always_ff` non-blocking semantics) and `=` for combinational wires and output ports (`always_comb` blocking semantics).
+4. **Single-Writer Rule**: Multiple drivers on the same net across statements, continuous wires, or blocks are rejected before code emission.
 
-### 5.2 Register Updates (`:=` and `reg.next`)
+### 5.2 Register Updates (`:=`)
 
-Within a `comb` block, registers can be scheduled for the next clock edge using the dedicated **register non-blocking assignment operator (`:=`)** or the explicit `.next` property:
+Clocked registers are updated inside `comb` blocks exclusively using the dedicated **register assignment operator (`:=`)**:
 
 ```zig
 comb {
-    // Dedicated register assignment (:=):
+    // Scalar register update:
     count := count +% 1;
     fsm_state := State.read;
 
     // Array element register update:
     fifo_mem[wr_ptr] := din;
 
-    // Explicit .next syntax (fully supported backward-compatible alias):
-    count.next = count +% 1;
+    // Struct field register update:
+    pkt.cmd := 0x42;
+
+    // Bit-slice register update:
+    flags[0] := 1;
+
+    // Aggregate tuple unpacking:
+    .{ r_hi, r_lo } := .{ in_data[4..8], in_data[0..4] };
 }
 ```
 
-#### Why `:=`?
-1. **Visual Time Boundary**: Distinguishes instantaneous 0-delay wires (`=`) from 1-cycle delayed flip-flops (`:=`) at the call-site without requiring verbose `.next` properties.
-2. **Clean Array Indexing**: Avoids syntactic awkwardness with memories (`mem[ptr] := data` vs `mem[ptr].next = data`).
+#### Why `:=` ("The One Obvious Way")?
+1. **Visual Time Boundary**: Clearly distinguishes instantaneous 0-delay wires (`=`) from 1-cycle delayed flip-flops (`:=`) at the call-site.
+2. **Clean Array, Struct, and Slice Indexing**: Eliminates syntactic awkwardness (`mem[ptr] := data` vs `mem[ptr].next = data`).
 3. **No Collision with `<=`**: Avoids Verilog's bug-prone overloading of `<=` (which is strictly the less-than-or-equal comparison operator in ZHdl).
-4. **Compile-Time Enforcement**: Attempting to use `:=` on a combinational `wire` triggers a compile error:
+4. **Strict Rejection of '=' on Registers**: Attempting to assign a clocked register using `=` produces an actionable compile error:
+   ```text
+   COMPILE ERROR: Cannot Assign Clocked Register 'r' Using '='
+   Registers update synchronously on clock edges using ':='.
+   ```
+5. **Strict Rejection of ':=' on Wires**: Attempting to use `:=` on a combinational wire produces an actionable compile error:
    ```text
    COMPILE ERROR: Invalid Register Assignment (':=') on Signal 'w'
    The operator ':=' is reserved for clocked registers ('reg').
    ```
+6. **Deprecation of `.next`**: The legacy `.next =` syntax is deprecated and triggers a compile error directing developers to `:=`.
 
 #### Latch-Free Hold Guarantee
 At the beginning of every evaluation cycle, all registers implicitly default to:
 $$\text{reg\_d} = \text{reg\_q}$$
 Unless explicitly updated within conditional branches, a register preserves its existing state. This guarantees **100% latch-free synthesizable RTL**.
 
-### 5.3 Synchronous Blocks (`sync`)
+### 5.3 Clock Binding & Deprecated `sync` Blocks
 
-Alternatively, sequential logic can be grouped into edge-triggered `sync` blocks:
+In ZHdl, clocks and resets belong to **registers**, not to procedural blocks. Clock and reset bindings are declared directly on registers:
 
 ```zig
-sync(clk, rst) {
-    if (en) {
-        count = count +% 1;
-    }
-}
+// Inferred binding to module default ports (clk, rst)
+reg count: u8 = 0;
+
+// Explicit clock and reset binding
+reg(clk, rst) count: u8 = 0;
+
+// Clocked register with explicit active-low reset
+reg(clk, rst_n, .low) state: u4 = 0;
 ```
-Any signal assigned inside a `sync` block is automatically lowered to a D-flip-flop clocked by `clk`.
+
+Legacy `sync` blocks (`sync(clk, rst) { ... }`) are deprecated. Compiling a `sync` block emits an actionable error guiding the developer to declare `reg(clk, rst)` and use `comb { ... }` with `:=`.
 
 ---
 
@@ -571,7 +589,7 @@ To explicitly avoid synthesis overflow ambiguities:
 - `*%`: Wrapping multiplication.
 
 ```zig
-count.next = count +% 1; // 255 +% 1 wraps to 0
+count := count +% 1; // 255 +% 1 wraps to 0
 ```
 
 ### 6.3 Bit Slicing: Upward and Downward
@@ -606,9 +624,9 @@ wire cur_byte: u8 = fifo_mem[rd_ptr];
 ```zig
 comb {
     if (reset_override) {
-        state.next = State.idle;
+        state := State.idle;
     } else if (data_ready) {
-        state.next = State.read;
+        state := State.read;
     }
 }
 ```
@@ -852,7 +870,7 @@ Solution:
   Break the combinational cycle by declaring a clocked register:
     reg w8: ... = 0;
     comb {
-        w8.next = ...;
+        w8 := ...;
     }
 ======================================================================
 ```
@@ -1110,13 +1128,13 @@ ZHdl compiles to clean, standard IEEE 1800-2017 SystemVerilog. The table below s
 | `reg r: u8 = 0;` | `logic [7:0] r_q, r_d; always_ff @(posedge clk) ...` | Flip-flop with $Q$/$D$ separation |
 | `reg r (is_sync_stage)` | `(* ASYNC_REG = "TRUE" *) always_ff @(posedge clk) ...` | Synchronizer synthesis attribute |
 | `comb { ... }` | `always_comb begin ... end` | Combinational procedure |
-| `reg.next = expr;` / `reg := expr;` | `reg_d = expr;` (inside `always_comb`) | Latch-free register next-state update |
+| `reg := expr;` | `reg_d = expr;` (inside `always_comb`) | Latch-free register next-state update |
 | `a +% b` | `a + b` | Native wrapping in bit-vector |
 | `x[0..8]` | `x[7:0]` | Upward slice conversion |
 | `x[4..0]` | `x[3:0]` | Downward slice conversion |
 | `@bitReverse(x)` | `{<<{x}}` | Streaming bit reflection |
 | `@byteSwap(x)` | `{<<8{x}}` | Streaming byte reversal |
-| `@concat(a, b)` | `{a, b}` | Bit concatenation |
+| `.{ a, b }` / `@concat(a, b)` | `{a, b}` | Bit concatenation / aggregate literal |
 | `switch (x) { ... }` | `case (x) ... endcase` | Clean decoder syntax |
 | `Sub.instantiate(...)` | `Sub u_Sub ( .port(sig), ... );` | Explicit named port binding |
 | `test "name" { ... }` | `module name_tb; ... initial begin ... end endmodule` | Dedicated test harness |

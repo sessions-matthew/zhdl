@@ -15,7 +15,7 @@ test "lexer basic tokens" {
         \\    var count_reg = reg(u8, .{ .clk = clk, .rst = rst, .init = 0 });
         \\    comb {
         \\        if (en) {
-        \\            count_reg.next = count_reg +% 1;
+        \\            count_reg := count_reg +% 1;
         \\        }
         \\        count = count_reg;
         \\    }
@@ -67,7 +67,7 @@ test "parser module and downward slicing sugar" {
         \\    out rev: u4,
         \\    var count = reg(u8, .{ .clk = clk, .rst = rst, .init = 0 });
         \\    comb {
-        \\        count.next = count +% 1;
+        \\        count := count +% 1;
         \\        dout = count[0..4];
         \\        rev = count[4..0]; // downward slicing syntactic sugar!
         \\    }
@@ -97,7 +97,7 @@ test "end-to-end elaboration and SystemVerilog emission" {
         \\    var count_reg = reg(u8, .{ .clk = clk, .rst = rst, .init = 0 });
         \\    comb {
         \\        if (en) {
-        \\            count_reg.next = count_reg +% 1;
+        \\            count_reg := count_reg +% 1;
         \\        }
         \\        count = count_reg;
         \\        rev = count_reg[4..0]; // downward slicing
@@ -149,8 +149,8 @@ test "option 1 reg syntax with implicit clock/reset binding" {
         \\    reg(clk, .none) unreset_pipe: u8 = 0;
         \\
         \\    comb {
-        \\        buffer.next = d_in;
-        \\        unreset_pipe.next = buffer;
+        \\        buffer := d_in;
+        \\        unreset_pipe := buffer;
         \\        d_out = unreset_pipe;
         \\    }
         \\};
@@ -407,7 +407,7 @@ test "race condition: clocked registers safely break combinational loops" {
         \\    out count: u8,
         \\    reg count_reg: u8 = 0;
         \\    comb {
-        \\        count_reg.next = count_reg +% 1;
+        \\        count_reg := count_reg +% 1;
         \\        count = count_reg;
         \\    }
         \\};
@@ -474,7 +474,7 @@ test "cdc: detect and reject unsynchronized direct cross-domain register transfe
         \\    var reg_a = reg(u8, .{ .clk = clk_a, .init = 0 });
         \\    var reg_b = reg(u8, .{ .clk = clk_b, .init = 0 });
         \\    comb {
-        \\        reg_b.next = reg_a;
+        \\        reg_b := reg_a;
         \\    }
         \\};
     ;
@@ -500,7 +500,7 @@ test "cdc: detect and reject multi-hop combinational cross-domain path" {
         \\    wire w1: u8 = reg_fast + 1;
         \\    wire w2: u8 = w1 & 0x0F;
         \\    comb {
-        \\        reg_slow.next = w2;
+        \\        reg_slow := w2;
         \\    }
         \\};
     ;
@@ -526,7 +526,7 @@ test "cdc: safe cross-domain transfer with @sync2ff and ASYNC_REG emission" {
         \\    var reg_b = reg(u8, .{ .clk = clk_b, .init = 0 });
         \\    wire reg_a_synced: u8 = @sync2ff(clk_b, reg_a);
         \\    comb {
-        \\        reg_b.next = reg_a_synced;
+        \\        reg_b := reg_a_synced;
         \\        dout = reg_b;
         \\    }
         \\};
@@ -1927,8 +1927,8 @@ test "typed reset polarity: explicit polarity without variable name deduction" {
         \\    reg(clk, rst_custom) r2: u8 = 0;
         \\
         \\    comb {
-        \\        r1.next = d;
-        \\        r2.next = d;
+        \\        r1 := d;
+        \\        r2 := d;
         \\        q1 = r1;
         \\        q2 = r2;
         \\    }
@@ -2014,7 +2014,7 @@ test "dynamic enum variant resolution without hardcoded name deduction" {
         \\    reg state_reg: State = 0;
         \\
         \\    comb {
-        \\        state_reg.next = next_state;
+        \\        state_reg := next_state;
         \\        current_code = state_reg;
         \\    }
         \\};
@@ -2083,7 +2083,7 @@ test "strict clock domain binding: error on missing clock port" {
         \\    out result: u8,
         \\    reg count: u8 = 0;
         \\    comb {
-        \\        count.next = data;
+        \\        count := data;
         \\        result = count;
         \\    }
         \\};
@@ -2538,17 +2538,19 @@ test "sized number literals width inference and concatenation" {
     try runVerilatorLint(std.testing.allocator, sv_code);
 }
 
-test "optional comb: module with top-level statements and registers" {
+test "module hygiene: comb block with register updates and wire driving" {
     const src =
         \\pub const FlatCounter = module {
         \\    in clk: clock,
         \\    in rst: reset,
         \\    out count: u8,
         \\
-        \\    reg r_count: u8 = 0;
+        \\    reg(clk, rst) r_count: u8 = 0;
         \\
-        \\    r_count := r_count +% 1;
-        \\    count = r_count;
+        \\    comb {
+        \\        r_count := r_count +% 1;
+        \\        count = r_count;
+        \\    }
         \\};
         \\
         \\test "FlatCounter TB" {
@@ -2599,16 +2601,51 @@ test "optional comb: module with top-level statements and registers" {
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
 
-test "optional comb: anonymous block and top-level control flow" {
-    const src =
+test "module hygiene: reject anonymous block and bare control flow at module scope" {
+    const bare_block_src =
+        \\pub const BadBlockModule = module {
+        \\    in a: u8,
+        \\    out res: u8,
+        \\    {
+        \\        res = a;
+        \\    }
+        \\};
+    ;
+    var p1 = @import("parser.zig").Parser.init(std.testing.allocator, bare_block_src);
+    try std.testing.expectError(error.UnexpectedToken, p1.parse());
+
+    const bare_if_src =
+        \\pub const BadIfModule = module {
+        \\    in a: u8,
+        \\    in sel: u1,
+        \\    out res: u8,
+        \\    if (sel) {
+        \\        res = a;
+        \\    }
+        \\};
+    ;
+    var p2 = @import("parser.zig").Parser.init(std.testing.allocator, bare_if_src);
+    try std.testing.expectError(error.UnexpectedToken, p2.parse());
+
+    const bare_reg_assign_src =
+        \\pub const BadRegAssignModule = module {
+        \\    in clk: clock,
+        \\    reg r: u8 = 0;
+        \\    r := r +% 1;
+        \\};
+    ;
+    var p3 = @import("parser.zig").Parser.init(std.testing.allocator, bare_reg_assign_src);
+    try std.testing.expectError(error.UnexpectedToken, p3.parse());
+
+    // Valid explicit comb block
+    const valid_comb_src =
         \\pub const ControlModule = module {
         \\    in a: u8,
         \\    in b: u8,
         \\    in sel: u1,
         \\    out res: u8,
         \\
-        \\    // Anonymous block without comb keyword
-        \\    {
+        \\    comb {
         \\        if (sel) {
         \\            res = a +% b;
         \\        } else {
@@ -2618,7 +2655,7 @@ test "optional comb: anonymous block and top-level control flow" {
         \\};
     ;
 
-    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, valid_comb_src);
     var ast_tree = try parser.parse();
     defer ast_tree.deinit();
 
@@ -2697,11 +2734,12 @@ test "parameterized module declaration with pub const Name = module(comptime W: 
         \\    in en: u1,
         \\    out count: u(W),
         \\    reg count_reg: u(W) = 0;
-        \\
-        \\    if (en) {
-        \\        count_reg := count_reg +% 1;
+        \\    comb {
+        \\        if (en) {
+        \\            count_reg := count_reg +% 1;
+        \\        }
+        \\        count = count_reg;
         \\    }
-        \\    count = count_reg;
         \\};
         \\
         \\pub const Top = module {
@@ -2943,8 +2981,10 @@ test "optional sim block: flat testbench with var decl and inline for" {
         \\    in inc: u8,
         \\    out total: u8,
         \\    reg acc: u8 = 0;
-        \\    acc := acc +% inc;
-        \\    total = acc;
+        \\    comb {
+        \\        acc := acc +% inc;
+        \\        total = acc;
+        \\    }
         \\}
         \\
         \\test "Accumulator TB Flat" {
@@ -3382,8 +3422,10 @@ test "multi-file @import: testbench instantiating imported DUT and sim run" {
         \\    out val: u8,
         \\
         \\    reg count: u8 = 0;
-        \\    count := count +% 1;
-        \\    val = count;
+        \\    comb {
+        \\        count := count +% 1;
+        \\        val = count;
+        \\    }
         \\};
     ;
     try vfiles.put("counter.zhdl", counter_pkg);
@@ -3618,6 +3660,443 @@ test "member aliasing and multi-level nested namespaces" {
     try runVerilatorLint(std.testing.allocator, sv_code);
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
+
+test "array literal initialization and indexing" {
+    const src =
+        \\pub module ArrayRom {
+        \\    in idx: u2,
+        \\    out out_val: u8,
+        \\    const ROM: [4]u8 = .{ 10, 20, 30, 40 };
+        \\    out_val = ROM[idx];
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("ArrayRom");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "'{") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "bit replication and reduction operators" {
+    const src =
+        \\pub module ReplicateReduce {
+        \\    in req: u4,
+        \\    out any_req: u1,
+        \\    out all_req: u1,
+        \\    out parity: u1,
+        \\    out mask: u4,
+        \\    any_req = |req;
+        \\    all_req = @reduceAnd(req);
+        \\    parity = ^req;
+        \\    mask = @replicate(4, 1);
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("ReplicateReduce");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "{4{") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "indexed part-select: +: and -: and @partSelect" {
+    const src =
+        \\pub module PartSelectMod {
+        \\    in word: u32,
+        \\    in byte_idx: u2,
+        \\    out byte_up: u8,
+        \\    out byte_builtin: u8,
+        \\    wire offset: u5 = @as(u5, byte_idx) * 8;
+        \\    byte_up = word[offset +: 8];
+        \\    byte_builtin = @partSelect(word, offset, 8);
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("PartSelectMod");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "module array constant indexed dynamically" {
+    const src =
+        \\pub const RomModule = module {
+        \\    in idx: u2,
+        \\    out data: u8,
+        \\    const TABLE: [4]u8 = .{ 10, 20, 30, 40 };
+        \\    comb {
+        \\        data = TABLE[idx];
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("RomModule");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "inline for with dynamic part select and array register" {
+    const src =
+        \\pub fn rotr(x: u32, comptime n: u32) u32 {
+        \\    return (x >> n) | (x << (32 - n));
+        \\}
+        \\
+        \\pub const ShaBlock = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    in load: u1,
+        \\    in block: u512,
+        \\    out w0: u32,
+        \\
+        \\    reg(clk, rst) w_mem: [16]u32 = 0;
+        \\
+        \\    comb {
+        \\        if (load) {
+        \\            inline for (0..16) |i| {
+        \\                w_mem[i] := block[(15 - i) * 32 +: 32];
+        \\            }
+        \\        }
+        \\        w0 = rotr(w_mem[0], 2);
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("ShaBlock");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "signed comparison and arithmetic shift right with @as(i32, ...)" {
+    const src =
+        \\pub module AluSigned {
+        \\    in a: u32,
+        \\    in b: u32,
+        \\    in shamt: u5,
+        \\    out slt: u1,
+        \\    out sra: u32,
+        \\
+        \\    comb {
+        \\        slt = @as(i32, a) < @as(i32, b);
+        \\        sra = @as(i32, a) >> shamt;
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("AluSigned");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "($signed(a) < $signed(b))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "($signed(a) >>> shamt)") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "LHS concatenation and tuple assignment in comb and sync" {
+    const src =
+        \\pub module ConcatAssign {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    in a: u8,
+        \\    in b: u8,
+        \\    out cy: u1,
+        \\    out sum: u8,
+        \\    out shift_out: u1,
+        \\
+        \\    reg(clk, rst) shift_reg: u8 = 0xAA;
+        \\    reg(clk, rst) bit_out: u1 = 0;
+        \\
+        \\    comb {
+        \\        shift_out = bit_out;
+        \\        // Capture carry and sum simultaneously via tuple assignment
+        \\        .{ cy, sum } = @as(u9, a) + @as(u9, b);
+        \\
+        \\        // Shift register update via LHS concatenation assignment
+        \\        .{ shift_reg, bit_out } := .{ @as(u1, 0), shift_reg };
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("ConcatAssign");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "{cy, sum} = ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "{shift_reg_d, bit_out_d} = ") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "local const in comb statements and constant switch patterns" {
+    const src =
+        \\const OP_ADD = 2'b00;
+        \\const OP_SUB = 2'b01;
+        \\const OP_AND = 2'b10;
+        \\
+        \\pub module StatementConstMod {
+        \\    in op: u2,
+        \\    in a: u8,
+        \\    in b: u8,
+        \\    out res: u8,
+        \\
+        \\    comb {
+        \\        const sum = a + b;
+        \\        const diff = a - b;
+        \\        const bitwise_and = a & b;
+        \\
+        \\        res = 0;
+        \\        switch (op) {
+        \\            OP_ADD => res = sum,
+        \\            OP_SUB => res = diff,
+        \\            OP_AND => res = bitwise_and,
+        \\            else => res = 8'hFF,
+        \\        }
+        \\    }
+        \\}
+        \\
+        \\test "ConstSwitchTb" {
+        \\    wire op: u2 = 0;
+        \\    wire a: u8 = 10;
+        \\    wire b: u8 = 3;
+        \\    wire res: u8;
+        \\
+        \\    const dut = StatementConstMod.instantiate(.{
+        \\        .op = op,
+        \\        .a = a,
+        \\        .b = b,
+        \\        .res = res,
+        \\    });
+        \\
+        \\    sim {
+        \\        // Verify format % escaping in assert message:
+        \\        assert(1 == 1, "Testing 100% format code escape");
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("StatementConstMod");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "Testing 100%% format code escape") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+test "standardization: reject assigning register using =" {
+    const src =
+        \\pub const BadRegAssign = module {
+        \\    in clk: clock,
+        \\    in d: u8,
+        \\    reg(clk) count: u8 = 0;
+        \\    comb {
+        \\        count = d;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    const res = elaborator.elaborate(null);
+    try std.testing.expectError(error.TypeMismatch, res);
+}
+
+test "standardization: reject deprecated register .next syntax" {
+    const src =
+        \\pub const BadNextAssign = module {
+        \\    in clk: clock,
+        \\    in d: u8,
+        \\    reg(clk) count: u8 = 0;
+        \\    comb {
+        \\        count.next = d;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    const res = elaborator.elaborate(null);
+    try std.testing.expectError(error.TypeMismatch, res);
+}
+
+test "standardization: reject deprecated sync block" {
+    const src =
+        \\pub const BadSyncMod = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    reg count: u8 = 0;
+        \\    sync(clk, rst) {
+        \\        count := count +% 1;
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    try std.testing.expectError(error.UnexpectedToken, parser.parse());
+}
+
+test "standardization: tuple assignment with := operator and aggregate packing" {
+    const src =
+        \\pub const TupleAssignMod = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\    in in_data: u8,
+        \\    out out_hi: u4,
+        \\    out out_lo: u4,
+        \\
+        \\    reg(clk, rst) r_hi: u4 = 0;
+        \\    reg(clk, rst) r_lo: u4 = 0;
+        \\
+        \\    comb {
+        \\        out_hi = r_hi;
+        \\        out_lo = r_lo;
+        \\        .{ r_hi, r_lo } := .{ in_data[4..8], in_data[0..4] };
+        \\    }
+        \\};
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var design = try elaborator.elaborate("TupleAssignMod");
+    defer design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "{r_hi_d, r_lo_d} =") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
+
+
 
 
 

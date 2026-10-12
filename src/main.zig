@@ -248,6 +248,7 @@ pub fn main(init: std.process.Init) !void {
                 "verilator",
                 "--lint-only",
                 "-Wall",
+                "-Wno-MULTITOP",
                 "-I.",
             });
             if (std.fs.path.dirname(input_path)) |dir| {

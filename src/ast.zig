@@ -129,6 +129,8 @@ pub const ExprTag = enum {
     call,
     builtin_call,
     struct_init,
+    array_init,
+    part_select,
     if_expr,
     type_expr,
     module_literal,
@@ -183,6 +185,16 @@ pub const Expr = struct {
         struct_init: struct {
             type_expr: ?*Type,
             fields: []NamedExpr,
+        },
+        array_init: struct {
+            type_expr: ?*Type,
+            elements: []*Expr,
+        },
+        part_select: struct {
+            target: *Expr,
+            base: *Expr,
+            width: *Expr,
+            is_up: bool,
         },
         if_expr: struct {
             cond: *Expr,
@@ -262,7 +274,6 @@ pub const ModuleItemTag = enum {
     reg_decl,
     instance,
     comb_block,
-    sync_block,
     const_decl,
     sim_block,
     stmt,
@@ -292,11 +303,6 @@ pub const ModuleItem = struct {
             bindings: []PortBinding,
         },
         comb_block: struct {
-            stmts: []Statement,
-        },
-        sync_block: struct {
-            clk: *Expr,
-            rst: ?*Expr,
             stmts: []Statement,
         },
         const_decl: struct {

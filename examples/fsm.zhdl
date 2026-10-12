@@ -8,36 +8,38 @@ pub module FSM {
 
     reg state: u2 = 0;
 
-    // Safe defaults prevent any transparent latch inference
-    busy = 0;
-    done_pulse = 0;
+    comb {
+        // Safe defaults prevent any transparent latch inference
+        busy = 0;
+        done_pulse = 0;
 
-    switch (state) {
-        0 => { // idle
-            busy = 0;
-            done_pulse = 0;
-            if (start) {
-                state := 1; // goto read
-            }
-        },
-        1 => { // read
-            busy = 1;
-            done_pulse = 0;
-            state := 2; // goto write
-        },
-        2 => { // write
-            busy = 1;
-            done_pulse = 0;
-            state := 3; // goto done
-        },
-        3 => { // done
-            busy = 0;
-            done_pulse = 1;
-            state := 0; // return to idle
-        },
-        else => {
-            state := 0;
-        },
+        switch (state) {
+            0 => { // idle
+                busy = 0;
+                done_pulse = 0;
+                if (start) {
+                    state := 1; // goto read
+                }
+            },
+            1 => { // read
+                busy = 1;
+                done_pulse = 0;
+                state := 2; // goto write
+            },
+            2 => { // write
+                busy = 1;
+                done_pulse = 0;
+                state := 3; // goto done
+            },
+            3 => { // done
+                busy = 0;
+                done_pulse = 1;
+                state := 0; // return to idle
+            },
+            else => {
+                state := 0;
+            },
+        }
     }
 }
 
