@@ -151,6 +151,22 @@ pub const Builder = struct {
         return expr;
     }
 
+    pub fn bitOr(self: *Builder, left: *hir.HirExpr, right: *hir.HirExpr) *hir.HirExpr {
+        return self.binary(.pipe, left, right);
+    }
+
+    pub fn bitAnd(self: *Builder, left: *hir.HirExpr, right: *hir.HirExpr) *hir.HirExpr {
+        return self.binary(.ampersand, left, right);
+    }
+
+    pub fn logicalOr(self: *Builder, left: *hir.HirExpr, right: *hir.HirExpr) *hir.HirExpr {
+        return self.binary(.kw_or, left, right);
+    }
+
+    pub fn logicalAnd(self: *Builder, left: *hir.HirExpr, right: *hir.HirExpr) *hir.HirExpr {
+        return self.binary(.kw_and, left, right);
+    }
+
     pub fn mux(self: *Builder, cond: *hir.HirExpr, then_expr: *hir.HirExpr, else_expr: *hir.HirExpr) *hir.HirExpr {
         const expr = self.arenaAlloc().create(hir.HirExpr) catch @panic("OOM");
         expr.* = .{
