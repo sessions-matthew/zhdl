@@ -48,7 +48,7 @@ const H5_INIT: u32 = 0x9b05688c;
 const H6_INIT: u32 = 0x1f83d9ab;
 const H7_INIT: u32 = 0x5be0cd19;
 
-pub module Sha256Core {
+pub module Sha256Core(
     in clk: clock,
     in rst: reset(.async),
 
@@ -59,7 +59,7 @@ pub module Sha256Core {
     out ready: u1,
     out valid: u1,
     out digest: [8]u32,
-
+) {
     const K_TABLE: [64]u32 = .{
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
         0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

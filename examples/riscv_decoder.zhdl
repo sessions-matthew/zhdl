@@ -71,7 +71,7 @@ pub const DecodedOp = union(enum) {
     illegal: void,
 };
 
-pub module RiscvDecoder {
+pub module RiscvDecoder(
     in clk: clock,
     in rst: reset(.async),
     in pc: u32,
@@ -84,7 +84,7 @@ pub module RiscvDecoder {
     out wb_data: u32,
     out branch_taken: u1,
     out next_pc: u32,
-
+) {
     wire opcode: u7 = instr[6:0];
     wire r_fmt: RType = @bitCast(RType, instr);
     wire i_fmt: IType = @bitCast(IType, instr);

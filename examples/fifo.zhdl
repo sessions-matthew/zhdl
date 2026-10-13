@@ -11,7 +11,7 @@
 //   and simultaneous read/write single-cycle throughput
 // ==============================================================================
 
-pub module AxisFifo {
+pub module AxisFifo(
     in clk: clock,
     in rst: reset(.async),
 
@@ -29,7 +29,7 @@ pub module AxisFifo {
     out full: u1,
     out empty: u1,
     out count: u4,
-
+) {
     // Depth = 8 words -> 3-bit address [0..3], 4-bit pointer [0..4]
     reg(clk, rst) wr_ptr: u4 = 0;
     reg(clk, rst) rd_ptr: u4 = 0;

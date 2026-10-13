@@ -16,14 +16,14 @@ pub const XilinxDsp = extern("DSP48E1", .{ .include = "examples/xilinx_dsp48e1.v
     out p: u43,
 };
 
-pub module DspMac {
+pub module DspMac(
     in clk: clock,
     in rst: reset(.async),
     in clear: u1,
     in data_a: u25,
     in data_b: u18,
     out accum: u48,
-
+) {
     wire mult_result: u43;
     reg accum_q: u48 = 0;
 

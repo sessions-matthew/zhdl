@@ -7,7 +7,7 @@
 // - 32-step binary restoring division algorithm
 // - Full compliance with RISC-V unprivileged ISA specification (div-by-zero & signed overflow)
 
-pub module RiscvDiv {
+pub module RiscvDiv(
     in clk: clock,
     in resetn: reset(.async, .active_low),
 
@@ -20,7 +20,7 @@ pub module RiscvDiv {
     out pcpi_rd: u32,
     out pcpi_wait: u1,
     out pcpi_ready: u1,
-
+) {
     // Instruction decode registers
     reg(clk, resetn) instr_div: u1 = 0;
     reg(clk, resetn) instr_divu: u1 = 0;

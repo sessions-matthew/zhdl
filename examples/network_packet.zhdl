@@ -33,7 +33,7 @@ pub const IPv4Header = packed struct {
     }
 };
 
-pub module NetworkPacketEngine {
+pub module NetworkPacketEngine(
     in clk: clock,
     in rst: reset(.async),
 
@@ -47,7 +47,7 @@ pub module NetworkPacketEngine {
     out serial_byte: u8,
     out byte_parity: u1,
     out word_checksum: u8,
-
+) {
     reg r_host_word: u32 = 0;
     reg r_serial_byte: u8 = 0;
     reg r_parity: u1 = 0;

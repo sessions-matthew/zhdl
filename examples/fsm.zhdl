@@ -1,11 +1,11 @@
 //! Zero-Latch Finite State Machine with Strict Enums
-pub module FSM {
+pub module FSM(
     in clk: clock,
     in rst: reset(.async),
     in start: u1,
     out busy: u1,
     out done_pulse: u1,
-
+) {
     reg state: u2 = 0;
 
     comb {

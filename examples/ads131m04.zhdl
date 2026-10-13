@@ -2,7 +2,7 @@
 //! Protocol: SPI Mode 1 (CPOL=0, CPHA=1), 24-bit word size, 6-word (144-bit) frames
 //! Multi-channel loadcell and battery telemetry acquisition model
 
-pub module Ads131m04Model {
+pub module Ads131m04Model(
     in clk: clock,
     in rst_n: reset(.async, .active_low),
 
@@ -26,7 +26,7 @@ pub module Ads131m04Model {
     out reg_status_out: u16,
     out state_out: u3,
     out total_frames_out: u32,
-
+) {
     // Internal Registers (16-bit)
     reg device_state: u3 = 2; // ST_CONV = 2
     reg reg_id: u16 = 0x2404;

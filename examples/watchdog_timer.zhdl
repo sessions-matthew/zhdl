@@ -10,7 +10,7 @@
 //!    followed by hard system reset trigger ('wdt_reset_out').
 //! 4. Heartbeat clear / service ('pet') strobes.
 
-pub module WatchdogTimer {
+pub module WatchdogTimer(
     in clk: clock,
     in rst: reset(.async),
 
@@ -23,7 +23,7 @@ pub module WatchdogTimer {
     out wdt_reset_out: u1,
     out count_val: u16,
     out is_expired: u1,
-
+) {
     reg r_count: u16 = 0;
     reg r_warn_irq: u1 = 0;
     reg r_reset_out: u1 = 0;

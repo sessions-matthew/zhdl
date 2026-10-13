@@ -2,7 +2,7 @@
 //! Fully compliant with Texas Instruments AM335x TRM Chapter 20 (SPRUH73)
 //! 32-bit OCP/L4 Bus Slave, Prescaler, Compare/Overflow Match, Interrupt Output
 
-pub module Am335xTimer {
+pub module Am335xTimer(
     in clk: clock,
     in rst_n: reset(.async, .active_low),
 
@@ -17,7 +17,7 @@ pub module Am335xTimer {
 
     // Interrupt output line to INTC
     out irq_out: u1,
-
+) {
     // Timer Hardware Registers
     reg tiocp_cfg: u32 = 0;
     reg irqstatus_raw: u3 = 0;

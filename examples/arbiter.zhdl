@@ -7,7 +7,7 @@
 // - Constant-time lowest-set-bit priority isolation (req & -req)
 // - Dynamic mask rotation for fair circular scheduling
 
-pub module RoundRobinArbiter {
+pub module RoundRobinArbiter(
     in clk: clock,
     in rst: reset(.async),
 
@@ -17,7 +17,7 @@ pub module RoundRobinArbiter {
     out grant: u4,
     out grant_valid: u1,
     out grant_encoded: u2,
-
+) {
     reg(clk, rst) grant_reg: u4 = 0;
     reg(clk, rst) grant_valid_reg: u1 = 0;
     reg(clk, rst) grant_encoded_reg: u2 = 0;

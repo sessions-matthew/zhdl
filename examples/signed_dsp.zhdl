@@ -8,7 +8,7 @@
 //! 5. Fixed-point arithmetic and scaling.
 //! 6. Cycle-accurate simulation verifying bipolar impulse responses.
 
-pub module SignedDspMac {
+pub module SignedDspMac(
     in clk: clock,
     in rst: reset(.async),
 
@@ -20,7 +20,7 @@ pub module SignedDspMac {
     out acc_out: i16,
     out is_negative: u1,
     out is_saturated: u1,
-
+) {
     reg r_acc: i16 = 0;
     reg r_sat: u1 = 0;
 

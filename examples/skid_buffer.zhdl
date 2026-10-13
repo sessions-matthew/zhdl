@@ -6,7 +6,8 @@
 //! 3. Comptime generic sizing: 'SkidBuffer(comptime W: usize) type'.
 //! 4. Comprehensive testbench with backpressure stalls, burst transfers, and drain assertions.
 
-pub module SkidBuffer(comptime W: usize) {
+pub module SkidBuffer(
+    comptime W: usize,
     in clk: clock,
     in rst_n: reset(.async, .active_low),
 
@@ -17,7 +18,7 @@ pub module SkidBuffer(comptime W: usize) {
     // Master (Downstream Consumer) interface
     out m_data: ?u(W),
     in m_ready: u1,
-
+) {
     reg buf_data: ?u(W) = null;
     reg skid_data: ?u(W) = null;
 

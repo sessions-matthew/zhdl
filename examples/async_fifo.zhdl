@@ -7,7 +7,7 @@
 //! 4. Empty and Full flag generation across asynchronous clock domains.
 //! 5. Multi-clock simulation: 100MHz write clock and 33MHz read clock with burst verification.
 
-pub module AsyncFifo {
+pub module AsyncFifo(
     in wr_clk: clock,
     in wr_rst_n: reset(.async, .active_low),
     in wr_en: u1,
@@ -19,7 +19,7 @@ pub module AsyncFifo {
     in rd_en: u1,
     out rd_data: u16,
     out empty: u1,
-
+) {
     // Write domain registers
     reg(wr_clk, wr_rst_n) wr_ptr_bin: u4 = 0;
     reg(wr_clk, wr_rst_n) wr_ptr_gray: u4 = 0;

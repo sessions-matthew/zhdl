@@ -5,7 +5,7 @@
 // - LHS concatenation register updates: .{ data_reg.next, txd_reg.next } = @concat(0, data_reg)
 // - Verified end-to-end loopback transmission and reception in simulation
 
-pub module UartTx {
+pub module UartTx(
     in clk: clock,
     in rst: reset(.async),
 
@@ -17,7 +17,7 @@ pub module UartTx {
     out busy: u1,
 
     in prescale: u16,
-
+) {
     reg(clk, rst) s_axis_tready_reg: u1 = 0;
     reg(clk, rst) txd_reg: u1 = 1;
     reg(clk, rst) busy_reg: u1 = 0;
@@ -67,7 +67,7 @@ pub module UartTx {
     }
 }
 
-pub module UartRx {
+pub module UartRx(
     in clk: clock,
     in rst: reset(.async),
 
@@ -82,7 +82,7 @@ pub module UartRx {
     out frame_error: u1,
 
     in prescale: u16,
-
+) {
     reg(clk, rst) m_axis_tdata_reg: u8 = 0;
     reg(clk, rst) m_axis_tvalid_reg: u1 = 0;
     reg(clk, rst) rxd_reg: u1 = 1;

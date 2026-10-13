@@ -2,11 +2,11 @@
 //! Protocol: SOF (0xAA) | MSG_ID (1B) | LEN (1B) | PAYLOAD (N B) | CRC16 (2B BE)
 //! CRC: CCITT-FALSE (poly 0x1021, init 0xFFFF) over MSG_ID + LEN + PAYLOAD
 
-pub module Crc16Ccitt {
+pub module Crc16Ccitt(
     in current_crc: u16,
     in data_byte: u8,
     out next_crc: u16,
-
+) {
     wire c0: u16 = current_crc ^ @concat(data_byte, @as(u8, 0));
     wire c1: u16 = if (c0[15]) ((c0 << 1) ^ 0x1021) else (c0 << 1);
     wire c2: u16 = if (c1[15]) ((c1 << 1) ^ 0x1021) else (c1 << 1);
@@ -19,7 +19,7 @@ pub module Crc16Ccitt {
     next_crc = c8;
 }
 
-pub module UartBridge {
+pub module UartBridge(
     in clk: clock,
     in rst_n: reset(.async, .active_low),
 
@@ -44,7 +44,7 @@ pub module UartBridge {
     out last_crc_valid: u1,
     out packet_received_pulse: u1,
     out last_payload: [256]u8,
-
+) {
     // Submodule instantiation for CRC calculation
     wire crc_step_out: u16;
     const crc_unit = Crc16Ccitt.instantiate(.{

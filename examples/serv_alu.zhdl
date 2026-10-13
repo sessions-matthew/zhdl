@@ -8,7 +8,7 @@
 // - Unified bitwise logic unit (XOR, OR, AND)
 // - Zero-overhead multiplexed result bus
 
-pub module ServAlu {
+pub module ServAlu(
     in clk: clock,
     in rst: reset(.async),
 
@@ -29,7 +29,7 @@ pub module ServAlu {
     in i_op_b: u1,
     in i_buf: u1,
     out o_rd: u1,
-
+) {
     // Internal state registers
     reg(clk, rst) cmp_r: u1 = 0;
     reg(clk, rst) add_cy_r: u1 = 0;

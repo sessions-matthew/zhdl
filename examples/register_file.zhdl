@@ -8,7 +8,7 @@
 //! 5. Hardwired zero-register immutability (x0 is always 0).
 //! 6. Full self-contained testbench with cycle-accurate timing and waveform output.
 
-pub module RegisterFile {
+pub module RegisterFile(
     in clk: clock,
     in rst: reset(.async),
 
@@ -27,7 +27,7 @@ pub module RegisterFile {
 
     // Diagnostics
     out r0_is_zero: u1,
-
+) {
     // 32-entry register array (each entry 32 bits wide)
     reg bank: [32]u32 = 0;
 
