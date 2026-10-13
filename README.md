@@ -38,22 +38,25 @@ pub const Command = union(enum) {
 pub module PacketFilter(comptime W: usize) {
     in clk: clock,
     in rst_n: reset(.async, .active_low),
+    in async ext_enable: u1, // Asynchronous external pin safely synchronized
     in cmd: Command,
     out rx_stream: ?u(W),
 
     reg active_header: ?PacketHeader = null;
 
     comb {
+        wire enable = @sync2ff(clk, ext_enable);
+
         switch (cmd) {
             .ping => |echo| {
-                rx_stream = echo; // Auto-wraps payload into valid/data stream
+                rx_stream = if (enable) echo else null;
             },
             .data => |hdr| {
-                if (hdr.isNull()) {
+                if (hdr.isNull() or !enable) {
                     active_header := null; // Clears optional register
                     rx_stream = null;
                 } else {
-                    active_header := hdr; // ':=' schedules 1-cycle flop update
+                    active_header := hdr;  // ':=' schedules 1-cycle flop update
                     rx_stream = hdr.len[7:0];
                 }
             },
@@ -67,18 +70,23 @@ pub module PacketFilter(comptime W: usize) {
 test "PacketFilter processes commands" {
     var clk = clock(100MHz); // Declarative clock oscillator with frequency literal
     var rst_n = reset(.async, .active_low); // Explicit asynchronous active-low reset
+    wire ext_enable: u1 = 1; // External asynchronous control pin
     wire cmd: Command;
     wire rx_stream: ?u8;
 
     const dut = PacketFilter(8).instantiate(.{
         .clk = clk,
         .rst_n = rst_n,
+        .ext_enable = ext_enable,
         .cmd = cmd,
         .rx_stream = rx_stream,
     });
 
     trace("filter_tb.vcd");
     clk.pulse_reset(rst_n, 2); // Synchronous 2-cycle reset pulse on clock
+
+    // Allow 2-stage synchronizer pipeline to settle
+    clk.step(2);
 
     cmd = Command{ .ping = 0xA5 };
     clk.step(1);          // Synchronous clock step method
