@@ -255,32 +255,152 @@ pub const Desugarer = struct {
         return false;
     }
 
+    fn parsePort(self: *Desugarer, symbols_list: *ArrayList(Symbol)) !void {
+        var is_async = false;
+        if (self.matchTag(.kw_async)) {
+            is_async = true;
+        }
+
+        const dir_tok = self.advance(); // in, out, or inout
+        const kind: SymbolKind = switch (dir_tok.tag) {
+            .kw_in => .in_port,
+            .kw_out => .out_port,
+            .kw_inout => .inout_port,
+            else => return error.ExpectedPortDirection,
+        };
+
+        if (!is_async and self.matchTag(.kw_async)) {
+            is_async = true;
+        }
+
+        const name = self.advance().slice;
+        _ = self.matchTag(.colon);
+
+        var is_clock = false;
+        var is_reset = false;
+        var reset_active_low = false;
+        var reset_is_sync = false;
+        var type_str: []const u8 = "";
+
+        if (self.peek().tag == .kw_clock) {
+            is_clock = true;
+            _ = self.advance();
+            type_str = "zhdl.Clock";
+        } else if (self.peek().tag == .kw_reset) {
+            is_reset = true;
+            _ = self.advance();
+            if (self.matchTag(.l_paren)) {
+                while (self.peek().tag != .eof and self.peek().tag != .r_paren) {
+                    const arg = self.advance();
+                    if (std.mem.eql(u8, arg.slice, "active_low")) reset_active_low = true;
+                    if (std.mem.eql(u8, arg.slice, "sync")) reset_is_sync = true;
+                }
+                _ = self.matchTag(.r_paren);
+            }
+            type_str = if (reset_is_sync)
+                (if (reset_active_low) "zhdl.SyncResetActiveLow" else "zhdl.SyncReset")
+            else
+                (if (reset_active_low) "zhdl.AsyncResetActiveLow" else "zhdl.AsyncReset");
+        } else {
+            const t_start = self.cursor;
+            var p_depth: usize = 0;
+            var b_depth: usize = 0;
+            while (self.peek().tag != .eof) {
+                if (self.peek().tag == .l_paren) p_depth += 1;
+                if (self.peek().tag == .r_paren) {
+                    if (p_depth == 0) break;
+                    p_depth -= 1;
+                }
+                if (self.peek().tag == .l_bracket) b_depth += 1;
+                if (self.peek().tag == .r_bracket) {
+                    if (b_depth == 0) break;
+                    b_depth -= 1;
+                }
+                if (p_depth == 0 and b_depth == 0 and (self.peek().tag == .comma or self.peek().tag == .semicolon)) {
+                    break;
+                }
+                _ = self.advance();
+            }
+            const t_end = self.cursor;
+            if (t_end > t_start) {
+                type_str = std.mem.trim(u8, self.source[self.tokens.items[t_start].loc.offset .. self.tokens.items[t_end - 1].loc.offset + self.tokens.items[t_end - 1].slice.len], " \t\r\n");
+            }
+        }
+        _ = self.matchTag(.comma);
+        _ = self.matchTag(.semicolon);
+
+        const sym = Symbol{
+            .name = name,
+            .kind = kind,
+            .type_str = try self.desugarType(type_str),
+            .is_async = is_async,
+            .is_clock = is_clock,
+            .is_reset = is_reset,
+            .reset_active_low = reset_active_low,
+            .reset_is_sync = reset_is_sync,
+        };
+        try symbols_list.append(sym);
+        try self.symbols.put(name, sym);
+    }
+
     fn processModule(self: *Desugarer) !void {
         self.symbols.clearRetainingCapacity();
 
         const is_pub = self.matchTag(.kw_pub);
 
         var mod_name: []const u8 = "";
-        var params: ?[]const u8 = null;
+        var comptime_params = ArrayList([]const u8).init(self.allocator);
+        defer comptime_params.deinit();
+
+        var symbols_list = ArrayList(Symbol).init(self.allocator);
+        defer symbols_list.deinit();
 
         if (self.peek().tag == .kw_module) {
             _ = self.advance(); // consume 'module'
             mod_name = self.advance().slice; // Name
 
+            // Paradigm 2: Ports and Comptime Generics in module(...) header with commas!
             if (self.peek().tag == .l_paren) {
                 _ = self.advance(); // '('
-                const start = self.cursor;
-                var depth: usize = 1;
-                while (self.peek().tag != .eof and depth > 0) {
-                    const tok = self.advance();
-                    if (tok.tag == .l_paren) depth += 1;
-                    if (tok.tag == .r_paren) {
-                        depth -= 1;
-                        if (depth == 0) break;
+                while (self.peek().tag != .eof and self.peek().tag != .r_paren) {
+                    if (self.peek().tag == .kw_in or self.peek().tag == .kw_out or self.peek().tag == .kw_inout or self.peek().tag == .kw_async) {
+                        try self.parsePort(&symbols_list);
+                    } else if (self.peek().tag == .kw_comptime) {
+                        const p_start = self.cursor;
+                        var p_depth: usize = 0;
+                        while (self.peek().tag != .eof) {
+                            if (self.peek().tag == .l_paren) p_depth += 1;
+                            if (self.peek().tag == .r_paren) {
+                                if (p_depth == 0) break;
+                                p_depth -= 1;
+                            }
+                            if (p_depth == 0 and self.peek().tag == .comma) break;
+                            _ = self.advance();
+                        }
+                        const p_end = self.cursor;
+                        const param_slice = std.mem.trim(u8, self.source[self.tokens.items[p_start].loc.offset .. self.tokens.items[p_end - 1].loc.offset + self.tokens.items[p_end - 1].slice.len], " \t\r\n");
+                        try comptime_params.append(param_slice);
+                        _ = self.matchTag(.comma);
+                    } else {
+                        // Generic parameter without explicit 'comptime' keyword, e.g. W: usize
+                        const p_start = self.cursor;
+                        var p_depth: usize = 0;
+                        while (self.peek().tag != .eof) {
+                            if (self.peek().tag == .l_paren) p_depth += 1;
+                            if (self.peek().tag == .r_paren) {
+                                if (p_depth == 0) break;
+                                p_depth -= 1;
+                            }
+                            if (p_depth == 0 and self.peek().tag == .comma) break;
+                            _ = self.advance();
+                        }
+                        const p_end = self.cursor;
+                        const param_slice = std.mem.trim(u8, self.source[self.tokens.items[p_start].loc.offset .. self.tokens.items[p_end - 1].loc.offset + self.tokens.items[p_end - 1].slice.len], " \t\r\n");
+                        try comptime_params.append(param_slice);
+                        _ = self.matchTag(.comma);
                     }
                 }
-                const end = self.cursor - 1;
-                params = self.source[self.tokens.items[start].loc.offset .. self.tokens.items[end].loc.offset];
+                _ = self.matchTag(.r_paren);
             }
         } else if (self.peek().tag == .kw_const) {
             _ = self.advance(); // consume 'const'
@@ -292,10 +412,6 @@ pub const Desugarer = struct {
         if (!self.matchTag(.l_brace)) {
             return error.ExpectedModuleOpeningBrace;
         }
-
-        // Collect statements and symbols inside module
-        var symbols_list = ArrayList(Symbol).init(self.allocator);
-        defer symbols_list.deinit();
 
         var flat_stmts = ArrayList([]const Token).init(self.allocator);
         defer flat_stmts.deinit();
@@ -313,97 +429,13 @@ pub const Desugarer = struct {
                 continue;
             }
 
-            // Port declarations
-            if (tok.tag == .kw_in) {
-                _ = self.advance();
-                var is_async = false;
-                if (self.peek().tag == .kw_async) {
-                    is_async = true;
-                    _ = self.advance();
-                }
-                const name = self.advance().slice;
-                _ = self.matchTag(.colon);
-
-                var is_clock = false;
-                var is_reset = false;
-                var reset_active_low = false;
-                var reset_is_sync = false;
-                var type_str: []const u8 = "";
-
-                if (self.peek().tag == .kw_clock) {
-                    is_clock = true;
-                    _ = self.advance();
-                    type_str = "zhdl.Clock";
-                } else if (self.peek().tag == .kw_reset) {
-                    is_reset = true;
-                    _ = self.advance();
-                    if (self.matchTag(.l_paren)) {
-                        while (self.peek().tag != .eof and self.peek().tag != .r_paren) {
-                            const arg = self.advance();
-                            if (std.mem.eql(u8, arg.slice, "active_low")) reset_active_low = true;
-                            if (std.mem.eql(u8, arg.slice, "sync")) reset_is_sync = true;
-                        }
-                        _ = self.matchTag(.r_paren);
-                    }
-                    type_str = if (reset_is_sync)
-                        (if (reset_active_low) "zhdl.SyncResetActiveLow" else "zhdl.SyncReset")
-                    else
-                        (if (reset_active_low) "zhdl.AsyncResetActiveLow" else "zhdl.AsyncReset");
-                } else {
-                    const t_start = self.cursor;
-                    while (self.peek().tag != .eof and self.peek().tag != .comma and self.peek().tag != .semicolon) {
-                        _ = self.advance();
-                    }
-                    const t_end = self.cursor;
-                    if (t_end > t_start) {
-                        type_str = std.mem.trim(u8, self.source[self.tokens.items[t_start].loc.offset .. self.tokens.items[t_end - 1].loc.offset + self.tokens.items[t_end - 1].slice.len], " \t\r\n");
-                    }
-                }
-                _ = self.matchTag(.comma);
-                _ = self.matchTag(.semicolon);
-
-                const sym = Symbol{
-                    .name = name,
-                    .kind = .in_port,
-                    .type_str = try self.desugarType(type_str),
-                    .is_async = is_async,
-                    .is_clock = is_clock,
-                    .is_reset = is_reset,
-                    .reset_active_low = reset_active_low,
-                    .reset_is_sync = reset_is_sync,
-                };
-                try symbols_list.append(sym);
-                try self.symbols.put(name, sym);
+            // Port declarations inside module body (backward compatibility)
+            if (tok.tag == .kw_in or tok.tag == .kw_out or tok.tag == .kw_inout or tok.tag == .kw_async) {
+                try self.parsePort(&symbols_list);
                 continue;
             }
 
-            if (tok.tag == .kw_out) {
-                _ = self.advance();
-                const name = self.advance().slice;
-                _ = self.matchTag(.colon);
-
-                const t_start = self.cursor;
-                while (self.peek().tag != .eof and self.peek().tag != .comma and self.peek().tag != .semicolon) {
-                    _ = self.advance();
-                }
-                const t_end = self.cursor;
-                var type_str: []const u8 = "";
-                if (t_end > t_start) {
-                    type_str = std.mem.trim(u8, self.source[self.tokens.items[t_start].loc.offset .. self.tokens.items[t_end - 1].loc.offset + self.tokens.items[t_end - 1].slice.len], " \t\r\n");
-                }
-                _ = self.matchTag(.comma);
-                _ = self.matchTag(.semicolon);
-
-                const sym = Symbol{
-                    .name = name,
-                    .kind = .out_port,
-                    .type_str = try self.desugarType(type_str),
-                };
-                try symbols_list.append(sym);
-                try self.symbols.put(name, sym);
-                continue;
-            }
-
+            // Register declarations (terminated with ;)
             if (tok.tag == .kw_reg) {
                 _ = self.advance();
                 const name = self.advance().slice;
@@ -474,9 +506,14 @@ pub const Desugarer = struct {
         _ = self.matchTag(.semicolon);
 
         // --- EMIT DESUGARED ZIG MODULE ---
-        if (params) |p| {
+        if (comptime_params.items.len > 0) {
             if (is_pub) try self.write("pub ");
-            try self.writeFmt("fn {s}({s}) type {{\n    return struct {{\n", .{ mod_name, p });
+            try self.writeFmt("fn {s}(", .{mod_name});
+            for (comptime_params.items, 0..) |p, p_idx| {
+                if (p_idx > 0) try self.write(", ");
+                try self.write(p);
+            }
+            try self.write(") type {\n    return struct {\n");
         } else {
             if (is_pub) try self.write("pub ");
             try self.writeFmt("const {s} = struct {{\n", .{mod_name});
@@ -530,7 +567,7 @@ pub const Desugarer = struct {
         try self.write("        }\n");
 
         // 3. Close module struct
-        if (params != null) {
+        if (comptime_params.items.len > 0) {
             try self.write("    };\n}\n");
         } else {
             try self.write("};\n");
@@ -983,4 +1020,70 @@ test "desugar real PacketFilter module with packed structs, union and bit slicin
     try testing.expect(std.mem.indexOf(u8, desugared, "zhdl.Out(?zhdl.UInt(W))") != null);
     try testing.expect(std.mem.indexOf(u8, desugared, "self.active_header.d = (hdr);") != null);
     try testing.expect(std.mem.indexOf(u8, desugared, "zhdl.slice(hdr.len, 7, 0)") != null);
+}
+
+test "Paradigm 2: Verilog-style ports in module(...) header with commas, registers in body with semicolons" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const zhdl_src =
+        \\pub module AnsiCounter(
+        \\    in clk: clock,
+        \\    in rst: reset(.async),
+        \\    in en: u1,
+        \\    out count: u8,
+        \\    out overflow: u1,
+        \\) {
+        \\    reg count_reg: u8 = 0;
+        \\
+        \\    overflow = (count_reg == 255);
+        \\
+        \\    comb {
+        \\        if (en != 0) {
+        \\            count_reg := count_reg +% 1;
+        \\        }
+        \\    }
+        \\
+        \\    count = count_reg;
+        \\}
+        \\
+        \\pub module AnsiGeneric(
+        \\    comptime W: usize,
+        \\    in clk: clock,
+        \\    in rst: reset(.async),
+        \\    out count: u(W),
+        \\) {
+        \\    reg count_reg: u(W) = 0;
+        \\    comb {
+        \\        count_reg := count_reg +% 1;
+        \\        count = count_reg;
+        \\    }
+        \\}
+    ;
+
+    const desugared = try desugar(allocator, zhdl_src);
+    defer allocator.free(desugared);
+
+    // Verify AnsiCounter (no comptime params -> const struct)
+    try testing.expect(std.mem.indexOf(u8, desugared, "pub const AnsiCounter = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, desugared, "clk: zhdl.In(zhdl.Clock),") != null);
+    try testing.expect(std.mem.indexOf(u8, desugared, "rst: zhdl.In(zhdl.AsyncReset),") != null);
+    try testing.expect(std.mem.indexOf(u8, desugared, "count_reg: zhdl.Reg(u8) = .init(0),") != null);
+
+    // Verify AnsiGeneric (has comptime params -> fn returning struct)
+    try testing.expect(std.mem.indexOf(u8, desugared, "pub fn AnsiGeneric(comptime W: usize) type {") != null);
+    try testing.expect(std.mem.indexOf(u8, desugared, "count: zhdl.Out(zhdl.UInt(W)),") != null);
+    try testing.expect(std.mem.indexOf(u8, desugared, "count_reg: zhdl.Reg(zhdl.UInt(W)) = .init(0),") != null);
+
+    // Validate standard Zig AST parse with 0 errors
+    var tree = try std.zig.Ast.parse(allocator, desugared, .{});
+    defer tree.deinit(allocator);
+
+    if (tree.errors.len > 0) {
+        std.debug.print("\n=== Desugared Paradigm 2 ===\n{s}\n", .{desugared});
+        for (tree.errors) |err| {
+            std.debug.print("AST Error: {any}\n", .{err});
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), tree.errors.len);
 }

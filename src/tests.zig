@@ -86,6 +86,34 @@ test "parser module and downward slicing sugar" {
     try std.testing.expectEqual(@as(usize, 7), decl.data.module_decl.items.len);
 }
 
+test "parser Paradigm 2 module with ports in header and body in braces" {
+    const src =
+        \\pub module Counter(
+        \\    in clk: clock,
+        \\    in rst: reset(.async),
+        \\    in din: u8,
+        \\    out dout: u4,
+        \\) {
+        \\    var count = reg(u8, .{ .clk = clk, .rst = rst, .init = 0 });
+        \\    comb {
+        \\        count := count +% 1;
+        \\        dout = count[0..4];
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), ast_tree.decls.len);
+    const decl = ast_tree.decls[0];
+    try std.testing.expectEqual(true, decl.is_pub);
+    try std.testing.expect(decl.tag == .module_decl);
+    try std.testing.expectEqualStrings("Counter", decl.data.module_decl.name);
+    try std.testing.expectEqual(@as(usize, 6), decl.data.module_decl.items.len);
+}
+
 test "end-to-end elaboration and SystemVerilog emission" {
     const src =
         \\pub const Counter = module {

@@ -240,12 +240,62 @@ pub const Parser = struct {
         } else if (self.match(.kw_module)) {
             const name_tok = try self.expect(.identifier);
             var params: []ast.FnParam = &.{};
+            var header_ports = ArrayList(ast.ModuleItem).init(alloc);
             if (self.match(.l_paren)) {
-                params = try self.parseFnParams(alloc, true);
+                var fn_params = ArrayList(ast.FnParam).init(alloc);
+                while (!self.check(.r_paren) and !self.check(.eof)) {
+                    var is_async_port = false;
+                    if (self.match(.kw_async)) {
+                        is_async_port = true;
+                    }
+                    if (self.check(.kw_in) or self.check(.kw_out) or self.check(.kw_inout)) {
+                        const port_loc = self.current.loc;
+                        const dir: ast.PortDir = if (self.match(.kw_in)) .in else if (self.match(.kw_out)) .out else blk: {
+                            _ = try self.expect(.kw_inout);
+                            break :blk .inout;
+                        };
+                        if (!is_async_port and self.match(.kw_async)) {
+                            is_async_port = true;
+                        }
+                        const port_name = try self.expect(.identifier);
+                        _ = try self.expect(.colon);
+                        const port_type = try self.parseType(alloc);
+                        try header_ports.append(.{
+                            .tag = .port,
+                            .loc = port_loc,
+                            .data = .{
+                                .port = .{
+                                    .dir = dir,
+                                    .name = port_name.slice,
+                                    .type_expr = port_type,
+                                    .is_async = is_async_port,
+                                },
+                            },
+                        });
+                    } else {
+                        const is_comptime = self.match(.kw_comptime);
+                        const param_name = try self.expect(.identifier);
+                        _ = try self.expect(.colon);
+                        const param_type = try self.parseType(alloc);
+                        try fn_params.append(.{
+                            .name = param_name.slice,
+                            .type_expr = param_type,
+                            .is_comptime = is_comptime or true,
+                            .loc = param_name.loc,
+                        });
+                    }
+                    if (!self.match(.comma)) break;
+                }
                 _ = try self.expect(.r_paren);
+                params = try fn_params.toOwnedSlice();
             }
-            const mod_items = try self.parseModuleBody(alloc);
+            const body_items = try self.parseModuleBody(alloc);
             _ = self.match(.semicolon);
+
+            var combined_items = ArrayList(ast.ModuleItem).init(alloc);
+            try combined_items.appendSlice(header_ports.items);
+            try combined_items.appendSlice(body_items);
+            const mod_items = try combined_items.toOwnedSlice();
             if (params.len > 0) {
                 const mod_expr = try alloc.create(ast.Expr);
                 mod_expr.* = .{
