@@ -292,8 +292,8 @@ wire busy = state.isBusy();
 
 ZHdl provides first-class verification primitives matching modern cycle-accurate and time-based testing workflows:
 - **Frequency Literals (`100MHz`, `50MHz`, `1GHz`, `32kHz`)**: Sub-nanosecond precision clock generators (`var clk = clock(100MHz);`).
-- **Signal-Centric Stepping**: Synchronous edge advancement (`clk.step(5)`, `clk.posedge()`, `clk.negedge()`).
-- **Dual-Mode Reset Pulses**: Cycle-based (`rst.pulse(2)`) and physical duration-based (`rst.pulse(20ns)`).
+- **Signal-Centric Stepping**: Synchronous edge advancement (`clk.step(5)`, `clk.posedge()`, `clk.negedge()`, `clk.wait_until(cond, N)`).
+- **Explicit Reset Pulses**: Synchronous clock-bound pulses (`clk.pulse_reset(rst, 2)`) and physical duration pulses (`rst.pulse(20ns)`).
 - **Timeout Assertions**: Bounded event detection (`wait_for(cond, 100ns)`, `wait_for(cond, 50)`).
 
 ### HDL Interoperability & Black Box Modules
@@ -345,7 +345,7 @@ The [`examples/`](examples/) directory includes full, self-contained hardware de
 | [`blackbox_dsp.zhdl`](examples/blackbox_dsp.zhdl) | `extern("DSP48E1", .{ .include = "..." })` black box IP integration, compile-time Verilog parameter overrides (`.A_WIDTH`, `.B_WIDTH`), synthesizable stubs, and 100MHz behavioral testbench. |
 | [`riscv_decoder.zhdl`](examples/riscv_decoder.zhdl) | Complete RV32I instruction decoder and execution unit using `packed struct` with type methods (`isSub()`, `getSignExtendedImm()`, `getLuiVal()`, `getBranchOffset()`), hardware tagged unions `union(enum)`, pattern matching `switch`, and bit-exact sign-extension. |
 | [`skid_buffer.zhdl`](examples/skid_buffer.zhdl) | Zero-bubble elastic pipeline stream buffering with ready/valid backpressure, hardware optionals `?T`, `null` checks, auto-wrapping, and 2-entry internal queueing. |
-| [`async_fifo.zhdl`](examples/async_fifo.zhdl) | Dual asynchronous clock domains (100MHz write, 33MHz read), active-low resets (`reset(.low)`), Gray code pointer conversion, static CDC checking, and safe CDC synchronization via `@sync2ff`. |
+| [`async_fifo.zhdl`](examples/async_fifo.zhdl) | Dual asynchronous clock domains (100MHz write, 33MHz read), active-low resets (`reset(.async, .active_low)`), Gray code pointer conversion, static CDC checking, and safe CDC synchronization via `@sync2ff`. |
 | [`packet_filter.zhdl`](examples/packet_filter.zhdl) | Parameterized generic module `pub module PacketFilter(comptime W: usize)`, tagged unions `union(enum)`, optional streams `?u(W)`, type methods, and flat testbench simulation. |
 | [`ads131m04.zhdl`](examples/ads131m04.zhdl) | Industrial 24-bit 4-channel delta-sigma ADC hardware interface with synchronous SPI framed protocol, DRDY pulse generation, and register control. |
 | [`uart_bridge.zhdl`](examples/uart_bridge.zhdl) | Full-duplex UART receiver/transmitter with start/stop framing, CRC16 verification, byte streaming, and host injection FIFO. |
