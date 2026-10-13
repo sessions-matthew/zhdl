@@ -6,6 +6,9 @@ pub const packet_filter = @import("packet_filter.zig");
 pub const fsm = @import("fsm.zig");
 pub const fifo = @import("fifo.zig");
 pub const arbiter = @import("arbiter.zig");
+pub const skid_buffer = @import("skid_buffer.zig");
+pub const riscv_decoder = @import("riscv_decoder.zig");
+pub const uart = @import("uart.zig");
 
 test {
     // Reference modules to force evaluation of their test blocks

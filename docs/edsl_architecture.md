@@ -123,6 +123,9 @@ test "Simulate Counter" {
 3. **`fsm.zig`**: Zero-latch finite state machine using strict Zig enums with guaranteed default outputs and cycle-by-cycle state assertions.
 4. **`fifo.zig`**: AXI4-Stream FIFO with standard `tvalid`/`tready` backpressure, circular pointers, burst writing, and drain verification.
 5. **`arbiter.zig`**: Parameterized priority arbiter with multiple simultaneous request lines.
+6. **`skid_buffer.zig`**: Zero-bubble elastic pipeline buffer using optional types (`?UInt(W)`), absorbing downstream stalls without throughput bubbles.
+7. **`riscv_decoder.zig`**: Full RISC-V RV32I instruction decoder using packed structs (`RType`, `IType`, `UType`, `BType`), sign-extension methods, and ALU execution (ADDI, ADD, SUB, LUI, BEQ).
+8. **`uart.zig`**: AXI4-Stream UART transmitter and receiver (`UartTx`, `UartRx`) with configurable baud prescaler, bit-accurate serialization/deserialization, and full loopback testbench.
 
 ---
 
