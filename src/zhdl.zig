@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const types = @import("edsl/types.zig");
 pub const builder = @import("edsl/builder.zig");
+pub const desugar = @import("edsl/desugar.zig").desugar;
 pub const hir = @import("hir.zig");
 pub const codegen = @import("codegen/systemverilog.zig");
 
@@ -27,6 +28,29 @@ pub const toHirType = types.toHirType;
 
 pub const UInt = types.UInt;
 pub const SInt = types.SInt;
+
+// Hardware bit manipulation & ergonomic sugar
+pub const cat = types.cat;
+pub const slice = types.slice;
+pub const bit = types.bit;
+pub const rep = types.rep;
+pub const mux = types.mux;
+pub const signExtend = types.signExtend;
+pub const toUInt = types.toUInt;
+pub const unwrapValue = types.unwrapValue;
+
+// Frequency and Time units
+pub const Frequency = types.Frequency;
+pub const Hz = types.Hz;
+pub const KHz = types.KHz;
+pub const MHz = types.MHz;
+pub const GHz = types.GHz;
+
+pub const Time = types.Time;
+pub const ps = types.ps;
+pub const ns = types.ns;
+pub const us = types.us;
+pub const ms = types.ms;
 
 pub const Builder = builder.Builder;
 pub const elaborate = builder.elaborate;
@@ -307,3 +331,75 @@ test "PacketFilter synthesis and native simulation" {
     try testing.expectEqual(@as(?u8, null), sim.dut.rx_stream.get());
     try testing.expectEqual(@as(?PacketHeader, null), sim.dut.active_header.get());
 }
+
+test "Tier 1 hardware sugar: cat, slice, bit, rep, mux, signExtend, and units" {
+    const testing = std.testing;
+
+    // 1. cat
+    const a: u4 = 0xA;
+    const b: u8 = 0x55;
+    const c: u2 = 0b11;
+    const concatenated = cat(.{ a, b, c });
+    try testing.expectEqual(@as(u14, (0xA << 10) | (0x55 << 2) | 0b11), concatenated);
+
+    // 2. slice
+    const val: u16 = 0xABCD;
+    const upper_byte = slice(val, 15, 8);
+    const lower_byte = slice(val, 7, 0);
+    const middle_nibble = slice(val, 11, 8);
+    try testing.expectEqual(@as(u8, 0xAB), upper_byte);
+    try testing.expectEqual(@as(u8, 0xCD), lower_byte);
+    try testing.expectEqual(@as(u4, 0xB), middle_nibble);
+
+    // 3. bit
+    try testing.expectEqual(@as(u1, 1), bit(val, 0));
+    try testing.expectEqual(@as(u1, 0), bit(val, 1));
+    try testing.expectEqual(@as(u1, 1), bit(val, 15));
+
+    // 4. rep
+    const one: u1 = 1;
+    const rep_8 = rep(one, 8);
+    try testing.expectEqual(@as(u8, 0xFF), rep_8);
+    const nibble: u4 = 0x5;
+    const rep_3 = rep(nibble, 3);
+    try testing.expectEqual(@as(u12, 0x555), rep_3);
+
+    // 5. mux
+    try testing.expectEqual(@as(u8, 42), mux(1, @as(u8, 42), @as(u8, 99)));
+    try testing.expectEqual(@as(u8, 99), mux(0, @as(u8, 42), @as(u8, 99)));
+
+    // 6. signExtend
+    const neg_8: u8 = 0b1000_0001; // -127 in i8
+    const extended_16 = signExtend(u16, neg_8);
+    try testing.expectEqual(@as(u16, 0xFF81), extended_16);
+
+    const pos_8: u8 = 0b0000_0111; // +7 in i8
+    const pos_ext_16 = signExtend(u16, pos_8);
+    try testing.expectEqual(@as(u16, 0x0007), pos_ext_16);
+
+    // 7. Frequency & Time units
+    const clk_freq = MHz(100);
+    try testing.expectEqual(@as(u64, 100_000_000), clk_freq.toHz());
+    try testing.expectEqual(@as(u64, 10_000), clk_freq.toPeriodPs()); // 10 ns = 10,000 ps
+
+    const delay = ns(10);
+    try testing.expectEqual(@as(u64, 10_000), delay.toPs());
+    try testing.expectEqual(@as(f64, 10.0), delay.toNs());
+
+    // 8. Methods on Reg and Port
+    var r = Reg(u16).init(0x1234);
+    try testing.expectEqual(@as(u4, 4), r.slice(3, 0));
+    try testing.expectEqual(@as(u1, 0), r.bit(0));
+    try testing.expectEqual(@as(u1, 1), r.bit(2));
+    r.next(0x5678);
+    try testing.expectEqual(@as(u16, 0x5678), r.d);
+    try testing.expectEqual(@as(u16, 0x1234), r.read());
+    r.commit();
+    try testing.expectEqual(@as(u16, 0x5678), r.read());
+}
+
+test {
+    _ = @import("edsl/desugar.zig");
+}
+
+

@@ -128,6 +128,14 @@ pub fn In(comptime T: type) type {
             }
             return false;
         }
+
+        pub fn bit(self: @This(), comptime idx: u16) u1 {
+            return types_slice(self.get(), idx, idx);
+        }
+
+        pub fn slice(self: @This(), comptime high: u16, comptime low: u16) UInt(high - low + 1) {
+            return types_slice(self.get(), high, low);
+        }
     };
 }
 
@@ -146,6 +154,18 @@ pub fn Out(comptime T: type) type {
         pub fn set(self: *@This(), v: anytype) void {
             self.val = if (@TypeOf(v) == T) v else @as(T, v);
         }
+
+        pub fn next(self: *@This(), v: anytype) void {
+            self.set(v);
+        }
+
+        pub fn bit(self: @This(), comptime idx: u16) u1 {
+            return types_slice(self.val, idx, idx);
+        }
+
+        pub fn slice(self: @This(), comptime high: u16, comptime low: u16) UInt(high - low + 1) {
+            return types_slice(self.val, high, low);
+        }
     };
 }
 
@@ -163,6 +183,18 @@ pub fn InOut(comptime T: type) type {
 
         pub fn set(self: *@This(), v: anytype) void {
             self.val = if (@TypeOf(v) == T) v else @as(T, v);
+        }
+
+        pub fn next(self: *@This(), v: anytype) void {
+            self.set(v);
+        }
+
+        pub fn bit(self: @This(), comptime idx: u16) u1 {
+            return types_slice(self.val, idx, idx);
+        }
+
+        pub fn slice(self: @This(), comptime high: u16, comptime low: u16) UInt(high - low + 1) {
+            return types_slice(self.val, high, low);
         }
     };
 }
@@ -189,8 +221,16 @@ pub fn Reg(comptime T: type) type {
             return self.q;
         }
 
+        pub fn read(self: @This()) T {
+            return self.q;
+        }
+
         pub fn set(self: *@This(), val: anytype) void {
             self.d = if (@TypeOf(val) == T) val else @as(T, val);
+        }
+
+        pub fn next(self: *@This(), val: anytype) void {
+            self.set(val);
         }
 
         pub fn commit(self: *@This()) void {
@@ -204,6 +244,14 @@ pub fn Reg(comptime T: type) type {
         pub fn reset(self: *@This()) void {
             self.q = self.init_val;
             self.d = self.init_val;
+        }
+
+        pub fn bit(self: @This(), comptime idx: u16) u1 {
+            return types_slice(self.q, idx, idx);
+        }
+
+        pub fn slice(self: @This(), comptime high: u16, comptime low: u16) UInt(high - low + 1) {
+            return types_slice(self.q, high, low);
         }
     };
 }
@@ -223,7 +271,237 @@ pub fn Wire(comptime T: type) type {
         pub fn set(self: *@This(), v: T) void {
             self.val = v;
         }
+
+        pub fn next(self: *@This(), v: T) void {
+            self.set(v);
+        }
+
+        pub fn bit(self: @This(), comptime idx: u16) u1 {
+            return types_slice(self.val, idx, idx);
+        }
+
+        pub fn slice(self: @This(), comptime high: u16, comptime low: u16) UInt(high - low + 1) {
+            return types_slice(self.val, high, low);
+        }
     };
+}
+
+// ============================================================================
+// Tier 1 Hardware Sugar: Ergonomic In-Language Bit Manipulation & Units
+// ============================================================================
+
+pub const Frequency = struct {
+    hz: u64,
+    pub fn toHz(self: Frequency) u64 {
+        return self.hz;
+    }
+    pub fn toPeriodPs(self: Frequency) u64 {
+        return 1_000_000_000_000 / self.hz;
+    }
+    pub fn toPeriodNs(self: Frequency) f64 {
+        return 1_000_000_000.0 / @as(f64, @floatFromInt(self.hz));
+    }
+};
+
+pub fn Hz(comptime val: u64) Frequency {
+    return .{ .hz = val };
+}
+pub fn KHz(comptime val: u64) Frequency {
+    return .{ .hz = val * 1_000 };
+}
+pub fn MHz(comptime val: u64) Frequency {
+    return .{ .hz = val * 1_000_000 };
+}
+pub fn GHz(comptime val: u64) Frequency {
+    return .{ .hz = val * 1_000_000_000 };
+}
+
+pub const Time = struct {
+    ps: u64,
+    pub fn toPs(self: Time) u64 {
+        return self.ps;
+    }
+    pub fn toNs(self: Time) f64 {
+        return @as(f64, @floatFromInt(self.ps)) / 1000.0;
+    }
+    pub fn toUs(self: Time) f64 {
+        return @as(f64, @floatFromInt(self.ps)) / 1_000_000.0;
+    }
+    pub fn toMs(self: Time) f64 {
+        return @as(f64, @floatFromInt(self.ps)) / 1_000_000_000.0;
+    }
+};
+
+pub fn ps(comptime val: u64) Time {
+    return .{ .ps = val };
+}
+pub fn ns(comptime val: u64) Time {
+    return .{ .ps = val * 1_000 };
+}
+pub fn us(comptime val: u64) Time {
+    return .{ .ps = val * 1_000_000 };
+}
+pub fn ms(comptime val: u64) Time {
+    return .{ .ps = val * 1_000_000_000 };
+}
+
+pub fn UnwrapType(comptime T: type) type {
+    if (comptime isClock(T)) return u1;
+    if (comptime isReset(T)) return u1;
+    if (comptime isAsync(T)) return T.InnerType;
+    if (comptime isPort(T)) {
+        if (comptime isAsync(T.DataType)) return T.DataType.InnerType;
+        if (comptime isClock(T.DataType)) return u1;
+        if (comptime isReset(T.DataType)) return u1;
+        return T.DataType;
+    }
+    if (comptime isReg(T)) return T.DataType;
+    if (comptime isWire(T)) return T.DataType;
+    return T;
+}
+
+pub fn unwrapValue(val: anytype) UnwrapType(@TypeOf(val)) {
+    const T = @TypeOf(val);
+    if (comptime isClock(T)) return val.get();
+    if (comptime isReset(T)) return val.get();
+    if (comptime isAsync(T)) return val.get();
+    if (comptime isPort(T)) return val.get();
+    if (comptime isReg(T)) return val.get();
+    if (comptime isWire(T)) return val.get();
+    return val;
+}
+
+pub fn toUInt(val: anytype) UInt(bitWidth(@TypeOf(val))) {
+    const T = @TypeOf(val);
+    const W = comptime bitWidth(T);
+    if (T == bool) {
+        return if (val) 1 else 0;
+    }
+    const info = @typeInfo(T);
+    switch (info) {
+        .int => |i| {
+            if (i.signedness == .unsigned) {
+                return val;
+            } else {
+                return @as(UInt(W), @bitCast(val));
+            }
+        },
+        .@"enum" => {
+            return @intFromEnum(val);
+        },
+        .@"struct" => {
+            return @as(UInt(W), @bitCast(val));
+        },
+        else => return @as(UInt(W), @bitCast(val)),
+    }
+}
+
+fn CatTotalWidth(comptime Tuple: type) u16 {
+    const info = @typeInfo(Tuple);
+    if (info != .@"struct" or !info.@"struct".is_tuple) {
+        @compileError("cat expects a tuple of signals, e.g. cat(.{ a, b, c })");
+    }
+    var total: u16 = 0;
+    inline for (info.@"struct".field_types) |FT| {
+        const Unwrapped = UnwrapType(FT);
+        total += @intCast(bitWidth(Unwrapped));
+    }
+    return total;
+}
+
+/// Bitwise concatenation of multiple signals / integers, packed MSB to LSB.
+/// Example: cat(.{ @as(u4, 0xA), @as(u8, 0x55) }) -> 0xA55 (u12)
+pub fn cat(signals: anytype) UInt(CatTotalWidth(@TypeOf(signals))) {
+    const Tuple = @TypeOf(signals);
+    const TotalW = comptime CatTotalWidth(Tuple);
+    const RetType = UInt(TotalW);
+    if (TotalW == 0) return 0;
+
+    var result: RetType = 0;
+    inline for (@typeInfo(Tuple).@"struct".field_names) |fname| {
+        const item = @field(signals, fname);
+        const unwrapped = unwrapValue(item);
+        const w = comptime bitWidth(@TypeOf(unwrapped));
+        const uint_val = toUInt(unwrapped);
+        result = (result << w) | @as(RetType, uint_val);
+    }
+    return result;
+}
+
+/// Slices bits [high:low] (inclusive) from any signal or integer.
+/// Returns UInt(high - low + 1).
+pub fn slice(signal: anytype, comptime high: u16, comptime low: u16) UInt(high - low + 1) {
+    return types_slice(signal, high, low);
+}
+
+fn types_slice(signal: anytype, comptime high: u16, comptime low: u16) UInt(high - low + 1) {
+    comptime {
+        if (high < low) {
+            @compileError("slice(high, low): high (" ++ std.fmt.comptimePrint("{}", .{high}) ++ ") must be >= low (" ++ std.fmt.comptimePrint("{}", .{low}) ++ ")");
+        }
+    }
+    const W = high - low + 1;
+    const unwrapped = unwrapValue(signal);
+    const uint_val = toUInt(unwrapped);
+    const shifted = uint_val >> low;
+    return @as(UInt(W), @truncate(shifted));
+}
+
+/// Extracts a single bit at `idx` as `u1`.
+pub fn bit(signal: anytype, comptime idx: u16) u1 {
+    return types_slice(signal, idx, idx);
+}
+
+/// Replicates `signal` `count` times.
+/// Example: rep(@as(u1, 1), 8) -> 0xFF (u8), rep(@as(u4, 0xA), 3) -> 0xAAA (u12)
+pub fn rep(signal: anytype, comptime count: u16) UInt(count * bitWidth(UnwrapType(@TypeOf(signal)))) {
+    const unwrapped = unwrapValue(signal);
+    const ElemW = comptime bitWidth(@TypeOf(unwrapped));
+    const TotalW = comptime count * ElemW;
+    const RetType = UInt(TotalW);
+    if (count == 0) return 0;
+
+    const uint_elem = toUInt(unwrapped);
+    if (ElemW == 1) {
+        return if (uint_elem == 1) ~@as(RetType, 0) else 0;
+    }
+
+    var result: RetType = 0;
+    inline for (0..count) |_| {
+        result = (result << ElemW) | @as(RetType, uint_elem);
+    }
+    return result;
+}
+
+/// 2-to-1 Multiplexer helper: returns `a` if `cond != 0`, else `b`.
+pub fn mux(cond: anytype, a: anytype, b: anytype) @TypeOf(unwrapValue(a)) {
+    const c = unwrapValue(cond);
+    const is_true = switch (@typeInfo(@TypeOf(c))) {
+        .bool => c,
+        else => c != 0,
+    };
+    return if (is_true) unwrapValue(a) else unwrapValue(b);
+}
+
+/// Sign-extends `signal` to `Target` type (signed or unsigned integer).
+pub fn signExtend(comptime Target: type, signal: anytype) Target {
+    const unwrapped = unwrapValue(signal);
+    const InType = @TypeOf(unwrapped);
+    const InW = comptime bitWidth(InType);
+    const OutW = comptime bitWidth(Target);
+    comptime {
+        if (OutW < InW) {
+            @compileError("signExtend: Target width (" ++ std.fmt.comptimePrint("{}", .{OutW}) ++ ") cannot be smaller than input width (" ++ std.fmt.comptimePrint("{}", .{InW}) ++ ")");
+        }
+    }
+    const signed_in = @as(@Int(.signed, InW), @bitCast(toUInt(unwrapped)));
+    const signed_out = @as(@Int(.signed, OutW), signed_in);
+    const out_info = @typeInfo(Target);
+    if (out_info == .int and out_info.int.signedness == .signed) {
+        return signed_out;
+    } else {
+        return @as(Target, @bitCast(signed_out));
+    }
 }
 
 fn isContainer(comptime T: type) bool {

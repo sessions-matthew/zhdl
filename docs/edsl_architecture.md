@@ -116,6 +116,89 @@ test "Simulate Counter" {
 
 ---
 
+---
+
+## Syntax Sugar Architecture: Tier 1 & Tier 2
+
+To bridge hardware ergonomics with pure Zig semantics, ZHdl provides two complementary tiers of syntax sugar:
+
+### Tier 1: In-Language Hardware Ergonomics (100% Valid Zig)
+
+Available natively from `@import("zhdl")`:
+
+1. **Bitwise and Signal Manipulation**:
+   - `cat(.{ sig_a, sig_b, sig_c })`: Variadic bitwise concatenation packed MSB to LSB returning `UInt(total_width)`.
+   - `slice(val, high, low)`: Bit slicing `[high:low]` returning `UInt(high - low + 1)`.
+   - `bit(val, idx)`: Extracts 1-bit integer `u1`.
+   - `rep(val, count)`: Replicates 1-bit or $N$-bit value `count` times.
+   - `mux(cond, a, b)`: 2-to-1 hardware multiplexer returning `a` if `cond != 0` else `b`.
+   - `signExtend(TargetInt, val)`: Sign-extends smaller integer to target type width.
+
+2. **Direct Pin and Register Access**:
+   - `Reg(T)` exposes direct `.d = expr;` write and `.q` read access, alongside `.bit(idx)`, `.slice(high, low)`, and `.next(expr)`.
+   - `In(T)` and `Out(T)` expose `.val` and methods `.bit(idx)`, `.slice(high, low)`, and `.next(expr)`.
+
+3. **Physical Frequency and Timing Units**:
+   - Frequency: `Hz(N)`, `KHz(N)`, `MHz(N)`, `GHz(N)`. Methods: `.toHz()`, `.toPeriodPs()`, `.toPeriodNs()`.
+   - Time: `ps(N)`, `ns(N)`, `us(N)`, `ms(N)`. Methods: `.toPs()`, `.toNs()`, `.toUs()`, `.toMs()`.
+
+### Tier 2: Source-to-Source HDL Desugarer (`src/edsl/desugar.zig`)
+
+For hardware designers who prefer classic HDL brevity (`in`, `out`, `reg`, `:=`, `comb`, `100MHz`, `u(W)`), the Tier 2 desugarer transforms `.zhdl` files into valid Zig eDSL virtual buffers parsed with 0 errors by `std.zig.Ast`:
+
+```zhdl
+pub const Counter = module {
+    in clk: clock,
+    in rst: reset(.async),
+    in en: u1,
+    out count: u8,
+    out overflow: u1,
+
+    reg count_reg: u8 = 0;
+
+    overflow = (count_reg == 255);
+
+    comb {
+        if (en != 0) {
+            count_reg := count_reg +% 1;
+        }
+    }
+
+    count = count_reg;
+};
+```
+
+Desugars directly to:
+
+```zig
+const std = @import("std");
+const zhdl = @import("zhdl");
+
+pub const Counter = struct {
+    clk: zhdl.In(zhdl.Clock),
+    rst: zhdl.In(zhdl.AsyncReset),
+    en: zhdl.In(u1),
+    count: zhdl.Out(u8),
+    overflow: zhdl.Out(u1),
+    count_reg: zhdl.Reg(u8) = .init(0),
+
+    pub fn comb(self: *@This()) void {
+        self.overflow.val = (self.count_reg.q == 255);
+        self.count.val = self.count_reg.q;
+        if (self.en.get() != 0) {
+            self.count_reg.d = (self.count_reg.q +% 1);
+        }
+    }
+};
+```
+
+#### CLI Usage:
+```bash
+zhdl desugar input.zhdl -o output.zig
+```
+
+---
+
 ## Included Examples (`examples/edsl/`)
 
 1. **`counter.zig`**: Parameterized $W$-bit counter with reset, enable, overflow detection, and rollover testing.
@@ -136,3 +219,4 @@ Run the full suite of eDSL tests and examples:
 ```bash
 zig build test-edsl --summary all
 ```
+

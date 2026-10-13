@@ -29,6 +29,58 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "desugar")) {
+        if (args.len < 3) {
+            std.debug.print("Error: missing input .zhdl file\n\n", .{});
+            printUsage();
+            std.process.exit(1);
+        }
+        const input_path = args[2];
+        var output_path: ?[]const u8 = null;
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "-o")) {
+                if (i + 1 < args.len) {
+                    output_path = args[i + 1];
+                    i += 1;
+                }
+            }
+        }
+
+        const cwd = std.Io.Dir.cwd();
+        const source = cwd.readFileAlloc(io, input_path, allocator, .unlimited) catch |err| {
+            std.debug.print("Error reading file '{s}': {s}\n", .{ input_path, @errorName(err) });
+            std.process.exit(1);
+        };
+        defer allocator.free(source);
+
+        const desugar_mod = @import("edsl/desugar.zig");
+        const desugared = desugar_mod.desugar(allocator, source) catch |err| {
+            std.debug.print("Desugar error in '{s}': {s}\n", .{ input_path, @errorName(err) });
+            std.process.exit(1);
+        };
+        defer allocator.free(desugared);
+
+        const target_out = output_path orelse blk: {
+            if (std.mem.endsWith(u8, input_path, ".zhdl")) {
+                break :blk try std.fmt.allocPrint(allocator, "{s}.zig", .{input_path[0 .. input_path.len - 5]});
+            } else {
+                break :blk try std.fmt.allocPrint(allocator, "{s}.zig", .{input_path});
+            }
+        };
+        defer if (output_path == null) allocator.free(target_out);
+
+        const out_file = cwd.createFile(io, target_out, .{}) catch |err| {
+            std.debug.print("Error writing output file '{s}': {s}\n", .{ target_out, @errorName(err) });
+            std.process.exit(1);
+        };
+        defer out_file.close(io);
+
+        try out_file.writeStreamingAll(io, desugared);
+        std.debug.print("✓ Successfully desugared '{s}' -> '{s}'\n", .{ input_path, target_out });
+        return;
+    }
+
     if (std.mem.eql(u8, command, "compile") or std.mem.eql(u8, command, "lint") or std.mem.eql(u8, command, "check") or std.mem.eql(u8, command, "test")) {
         if (args.len < 3) {
             std.debug.print("Error: missing input .zhdl file\n\n", .{});
@@ -305,6 +357,7 @@ fn printUsage() void {
         \\Compiles to synthesizable IEEE 1800 SystemVerilog
         \\
         \\Usage:
+        \\  zhdl desugar <input.zhdl> [-o <output.zig>]               (Desugars HDL sugar to pure Zig eDSL virtual code)
         \\  zhdl compile <input.zhdl> [-o <output.sv>] [--top <ModuleName>]
         \\  zhdl test    <input.zhdl> [--include <file.v>] [-I <dir>]  (Compiles and runs simulation testbenches)
         \\  zhdl lint    <input.zhdl> [--include <file.v>] [-I <dir>]  (Compiles and runs Verilator --lint-only)
@@ -312,6 +365,7 @@ fn printUsage() void {
         \\  zhdl help                                                  (Displays this help message)
         \\
         \\Examples:
+        \\  zhdl desugar examples/counter.zhdl -o counter.zig
         \\  zhdl compile examples/counter.zhdl -o counter.sv
         \\  zhdl test    examples/counter.zhdl
         \\  zhdl lint    examples/fsm.zhdl
