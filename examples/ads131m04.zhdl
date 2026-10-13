@@ -230,8 +230,8 @@ pub module Ads131m04Model {
 }
 
 test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
-    wire clk: clock;
-    wire rst_n: reset(.low);
+    var clk = clock(100MHz);
+    var rst_n = reset(.active_low);
 
     wire spi_cs_n: u1;
     wire spi_sclk: u1;
@@ -271,7 +271,6 @@ test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
         .total_frames_out = total_frames_out,
     });
 
-    clk.generate(100MHz);
     trace("ads131m04_tb.vcd");
 
     sync_n = 1;
@@ -284,7 +283,7 @@ test "Ads131m04Model conversion, DRDY pulse, and SPI frame completion" {
     stim_ch2 = 0x345678;
     stim_ch3 = 0x456789;
 
-    rst_n.pulse(2);
+    rst_n.pulse(2, clk);
 
     // 1. Initial State Checks
     assert(state_out == 2, "State should initialize to ST_CONV (2)");

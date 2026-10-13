@@ -68,8 +68,8 @@ pub module WatchdogTimer {
 }
 
 test "WatchdogTimer handles service pet, warning interrupt, and timeout reset" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
 
     wire enable: u1;
     wire pet: u1;
@@ -95,8 +95,7 @@ test "WatchdogTimer handles service pet, warning interrupt, and timeout reset" {
     });
 
     trace("watchdog_timer_tb.vcd");
-    clk.generate(100MHz); // 10ns clock period
-    rst.pulse(2);
+    rst.pulse(2, clk);
 
     // 1. Initial configuration: 8-tick timeout, warning at 3 ticks
     clk.negedge();

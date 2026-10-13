@@ -153,8 +153,8 @@ pub module UartRx {
 }
 
 test "UartLoopbackTb" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
 
     wire tx_data: u8 = 0;
     wire tx_valid: u1 = 0;
@@ -196,8 +196,7 @@ test "UartLoopbackTb" {
     });
 
     sim {
-        clk.generate(100MHz);
-        rst.pulse(5);
+        rst.pulse(5, clk);
 
         // Wait for reset release and transmitter ready
         clk.step(10);

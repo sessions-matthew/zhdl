@@ -678,7 +678,7 @@ pub const SystemVerilogEmitter = struct {
                 },
                 .rst_pulse => {
                     const rp = stmt.data.rst_pulse;
-                    const clk_to_use = default_clk;
+                    const clk_to_use = rp.clk_name orelse default_clk;
                     if (rp.duration_raw) |dur| {
                         if (rp.active_low) {
                             try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
@@ -761,6 +761,7 @@ pub const SystemVerilogEmitter = struct {
                 },
                 .wait_for => {
                     const wf = stmt.data.wait_for;
+                    const clk_to_use = wf.clk_name orelse default_clk;
                     if (wf.timeout_raw) |t_raw| {
                         try writer.writeAll("        fork\n");
                         try writer.writeAll("            begin\n");
@@ -778,7 +779,7 @@ pub const SystemVerilogEmitter = struct {
                         try self.emitExpr(wf.cond, writer);
                         try writer.writeAll(");\n");
                         try writer.writeAll("            end\n");
-                        try writer.print("            begin\n                repeat ({d}) @(posedge {s});\n                $error(\"[TIMEOUT] wait_for timed out\");\n                $fatal(1);\n            end\n", .{ max_c, default_clk });
+                        try writer.print("            begin\n                repeat ({d}) @(posedge {s});\n                $error(\"[TIMEOUT] wait_for timed out\");\n                $fatal(1);\n            end\n", .{ max_c, clk_to_use });
                         try writer.writeAll("        join_any\n");
                         try writer.writeAll("        disable fork;\n");
                     } else {
@@ -790,7 +791,6 @@ pub const SystemVerilogEmitter = struct {
                 .finish => {
                     try writer.writeAll("        $finish;\n");
                 },
-                .clk_generate => {},
             }
         }
 

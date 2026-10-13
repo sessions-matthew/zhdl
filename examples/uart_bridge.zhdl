@@ -171,8 +171,8 @@ pub module UartBridge {
 }
 
 test "UartBridge framing, CRC16 verification, and host injection FIFO" {
-    wire clk: clock;
-    wire rst_n: reset(.low);
+    var clk = clock(100MHz);
+    var rst_n = reset(.active_low);
 
     wire tx_byte_valid: u1;
     wire tx_byte: u8;
@@ -213,10 +213,9 @@ test "UartBridge framing, CRC16 verification, and host injection FIFO" {
         .last_payload = last_payload,
     });
 
-    clk.generate(100MHz);
     trace("uart_bridge_tb.vcd");
 
-    rst_n.pulse(2);
+    rst_n.pulse(2, clk);
     assert(total_packets_received == 0, "Packets count should start at 0");
     assert(total_bytes_received == 0, "Bytes count should start at 0");
 

@@ -1700,8 +1700,8 @@ test "generic module instantiated in hardware testbench" {
         \\}
         \\
         \\test "Counter8 TB" {
-        \\    wire clk: clock;
-        \\    wire rst: reset;
+        \\    var clk = clock(10ns);
+        \\    var rst = reset();
         \\    wire en: u1;
         \\    wire count: u8;
         \\
@@ -1713,10 +1713,9 @@ test "generic module instantiated in hardware testbench" {
         \\    });
         \\
         \\    sim {
-        \\        clk.generate(10);
-        \\        rst.pulse(2);
+        \\        rst.pulse(2, clk);
         \\        en = 1;
-        \\        step(5);
+        \\        clk.step(5);
         \\        assert(count == 5, "Counter should have counted to 5");
         \\    }
         \\}
@@ -1838,7 +1837,7 @@ test "time-based testing: delay with typed units (ns, us, ms, ps)" {
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
 
-test "time-based testing: clk.generate and wait_for with time literal timeout" {
+test "time-based testing: clock(10ns) and clk.wait_until with time literal timeout" {
     const src =
         \\pub const StepDevice = module {
         \\    in clk: clock,
@@ -1852,9 +1851,9 @@ test "time-based testing: clk.generate and wait_for with time literal timeout" {
         \\};
         \\
         \\test "WaitTime TB" {
-        \\    in clk: clock;
-        \\    in rst: reset;
-        \\    out ready: u1;
+        \\    var clk = clock(10ns);
+        \\    var rst = reset();
+        \\    wire ready: u1;
         \\
         \\    const dut = StepDevice.instantiate(.{
         \\        .clk = clk,
@@ -1863,9 +1862,8 @@ test "time-based testing: clk.generate and wait_for with time literal timeout" {
         \\    });
         \\
         \\    sim {
-        \\        clk.generate(10ns);
-        \\        rst.pulse(1);
-        \\        wait_for(ready == 1, 100ns);
+        \\        rst.pulse(1, clk);
+        \\        clk.wait_until(ready == 1, 100ns);
         \\        assert(ready == 1, "Ready should be high");
         \\        assert_within(ready == 1, 50ns);
         \\        finish();
@@ -1935,9 +1933,9 @@ test "typed reset polarity: explicit polarity without variable name deduction" {
         \\};
         \\
         \\test "TypedResetTb" {
-        \\    wire clk: clock;
-        \\    wire rst_n: reset(.high);
-        \\    wire rst_custom: reset(.low);
+        \\    var clk = clock(10ns);
+        \\    var rst_n = reset(.active_high);
+        \\    var rst_custom = reset(.active_low);
         \\    wire d: u8;
         \\    wire q1: u8;
         \\    wire q2: u8;
@@ -1952,10 +1950,9 @@ test "typed reset polarity: explicit polarity without variable name deduction" {
         \\    });
         \\
         \\    sim {
-        \\        clk.generate(10);
-        \\        rst_n.pulse(2);
-        \\        rst_custom.pulse(2);
-        \\        step(clk, 4);
+        \\        rst_n.pulse(2, clk);
+        \\        rst_custom.pulse(2, clk);
+        \\        clk.step(4);
         \\    }
         \\}
     ;
@@ -2020,8 +2017,8 @@ test "dynamic enum variant resolution without hardcoded name deduction" {
         \\};
         \\
         \\test "CustomEnumTb" {
-        \\    wire clk: clock;
-        \\    wire rst: reset;
+        \\    var clk = clock(10ns);
+        \\    var rst = reset();
         \\    const State = enum(u3) {
         \\        idle = 0,
         \\        running = 1,
@@ -2039,13 +2036,12 @@ test "dynamic enum variant resolution without hardcoded name deduction" {
         \\    });
         \\
         \\    sim {
-        \\        clk.generate(10);
-        \\        rst.pulse(2);
+        \\        rst.pulse(2, clk);
         \\        next_state = .waiting;
-        \\        step(clk, 2);
+        \\        clk.step(2);
         \\        assert(current_code == 5, "current_code should be 5 for .waiting");
         \\        next_state = .finished;
-        \\        step(clk, 2);
+        \\        clk.step(2);
         \\        assert(current_code == 7, "current_code should be 7 for .finished");
         \\    }
         \\}
@@ -2131,15 +2127,12 @@ test "sim timing: frequency literals (100MHz, 50MHz, 1GHz) and precise half-peri
         \\};
         \\
         \\test "FreqTb" {
-        \\    wire clk1: clock;
-        \\    wire clk2: clock;
-        \\    wire clk3: clock;
+        \\    var clk1 = clock(100MHz);
+        \\    var clk2 = clock(50MHz);
+        \\    var clk3 = clock(1GHz);
         \\    wire dummy: u1 = 0;
         \\    const dut = FreqDummy.instantiate(.{ .dummy = dummy });
         \\    sim {
-        \\        clk1.generate(100MHz);
-        \\        clk2.generate(50MHz);
-        \\        clk3.generate(1GHz);
         \\        delay(10ns);
         \\    }
         \\}
@@ -2188,8 +2181,8 @@ test "sim timing: clk.step, clk.posedge, clk.negedge, rst.pulse(duration), and r
         \\};
         \\
         \\test "TimingMethodsTb" {
-        \\    wire clk: clock;
-        \\    wire rst_n: reset(.low);
+        \\    var clk = clock(100MHz);
+        \\    var rst_n = reset(.active_low);
         \\    wire en: u1 = 0;
         \\    wire count: u8;
         \\
@@ -2201,8 +2194,6 @@ test "sim timing: clk.step, clk.posedge, clk.negedge, rst.pulse(duration), and r
         \\    });
         \\
         \\    sim {
-        \\        clk.generate(100MHz);
-        \\
         \\        // Real-time duration reset pulse
         \\        rst_n.pulse(20ns);
         \\        assert(count == 0, "Counter should be reset to 0");
@@ -2554,8 +2545,8 @@ test "module hygiene: comb block with register updates and wire driving" {
         \\};
         \\
         \\test "FlatCounter TB" {
-        \\    wire clk: clock;
-        \\    wire rst: reset;
+        \\    var clk = clock(100MHz);
+        \\    var rst = reset();
         \\    wire count: u8;
         \\
         \\    const dut = FlatCounter.instantiate(.{
@@ -2565,7 +2556,6 @@ test "module hygiene: comb block with register updates and wire driving" {
         \\    });
         \\
         \\    sim {
-        \\        clk.generate(100MHz);
         \\        rst.pulse(20ns);
         \\        clk.step(5);
         \\        clk.negedge();
@@ -2922,7 +2912,7 @@ test "optional sim block: flat testbench statements with clock gen and step" {
         \\}
         \\
         \\test "Inverter TB Flat" {
-        \\    wire clk: clock;
+        \\    var clk = clock(10ns);
         \\    wire a: u1;
         \\    wire y: u1;
         \\
@@ -2931,12 +2921,11 @@ test "optional sim block: flat testbench statements with clock gen and step" {
         \\        .y = y,
         \\    });
         \\
-        \\    clk.generate(10ns);
         \\    a = 0;
-        \\    step(clk, 1);
+        \\    clk.step(1);
         \\    assert(y == 1, "y should be 1 when a is 0");
         \\    a = 1;
-        \\    step(clk, 1);
+        \\    clk.step(1);
         \\    assert(y == 0, "y should be 0 when a is 1");
         \\    finish();
         \\}
@@ -2956,7 +2945,7 @@ test "optional sim block: flat testbench statements with clock gen and step" {
     const tb = hir_design.testbenches[0];
     try std.testing.expectEqual(@as(usize, 1), tb.clock_gens.len);
     try std.testing.expectEqualStrings("clk", tb.clock_gens[0].clk_name);
-    try std.testing.expect(tb.sim_stmts.len >= 6);
+    try std.testing.expect(tb.sim_stmts.len >= 5);
 
     var sv_buffer = ArrayList(u8).init(std.testing.allocator);
     defer sv_buffer.deinit();
@@ -2988,8 +2977,8 @@ test "optional sim block: flat testbench with var decl and inline for" {
         \\}
         \\
         \\test "Accumulator TB Flat" {
-        \\    wire clk: clock;
-        \\    wire rst: reset;
+        \\    var clk = clock(10ns);
+        \\    var rst = reset();
         \\    wire inc: u8;
         \\    wire total: u8;
         \\
@@ -3000,8 +2989,7 @@ test "optional sim block: flat testbench with var decl and inline for" {
         \\        .total = total,
         \\    });
         \\
-        \\    clk.generate(10);
-        \\    rst.pulse(2);
+        \\    rst.pulse(2, clk);
         \\    clk.negedge();
         \\
         \\    var step_val: u8 = 5;
@@ -3434,8 +3422,8 @@ test "multi-file @import: testbench instantiating imported DUT and sim run" {
         \\const cnt_pkg = @import("counter.zhdl");
         \\
         \\test "Imported Counter TB" {
-        \\    wire clk: clock;
-        \\    wire rst: reset;
+        \\    var clk = clock(100MHz);
+        \\    var rst = reset();
         \\    wire val: u8;
         \\
         \\    const dut = cnt_pkg.UpCounter.instantiate(.{
@@ -3444,7 +3432,6 @@ test "multi-file @import: testbench instantiating imported DUT and sim run" {
         \\        .val = val,
         \\    });
         \\
-        \\    clk.generate(100MHz);
         \\    rst.pulse(20ns);
         \\    clk.step(4);
         \\    clk.negedge();
@@ -4094,6 +4081,142 @@ test "standardization: tuple assignment with := operator and aggregate packing" 
     try std.testing.expect(std.mem.indexOf(u8, sv_code, "{r_hi_d, r_lo_d} =") != null);
     try runVerilatorLint(std.testing.allocator, sv_code);
 }
+
+test "simulation standard: reject procedural clk.generate with DeprecatedClockGenerate error" {
+    const src =
+        \\pub const Dummy = module { in x: u1, out y: u1, comb { y = x; } };
+        \\test "DeprecatedGenerateTb" {
+        \\    var clk = clock(100MHz);
+        \\    wire x: u1 = 0;
+        \\    wire y: u1;
+        \\    const dut = Dummy.instantiate(.{ .x = x, .y = y });
+        \\    sim {
+        \\        clk.generate(100MHz);
+        \\    }
+        \\}
+    ;
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    try std.testing.expectError(error.DeprecatedClockGenerate, elaborator.elaborate(null));
+}
+
+test "simulation standard: reject uninitialized clock declaration with UninitializedClock error" {
+    const src =
+        \\pub const Dummy = module { in x: u1, out y: u1, comb { y = x; } };
+        \\test "UninitializedClockTb" {
+        \\    wire clk: clock;
+        \\    wire x: u1 = 0;
+        \\    wire y: u1;
+        \\    const dut = Dummy.instantiate(.{ .x = x, .y = y });
+        \\    sim {
+        \\        x = 1;
+        \\    }
+        \\}
+    ;
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    try std.testing.expectError(error.UninitializedClock, elaborator.elaborate(null));
+}
+
+test "simulation standard: reject global step function with DeprecatedGlobalStep error" {
+    const src =
+        \\pub const Dummy = module { in x: u1, out y: u1, comb { y = x; } };
+        \\test "DeprecatedGlobalStepTb" {
+        \\    var clk = clock(100MHz);
+        \\    wire x: u1 = 0;
+        \\    wire y: u1;
+        \\    const dut = Dummy.instantiate(.{ .x = x, .y = y });
+        \\    sim {
+        \\        step(clk, 1);
+        \\    }
+        \\}
+    ;
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    try std.testing.expectError(error.DeprecatedGlobalStep, elaborator.elaborate(null));
+}
+
+test "simulation standard: explicit clock domain in rst.pulse(cycles, clk) and clk.wait_until" {
+    const src =
+        \\pub const MultiClockDevice = module {
+        \\    in clk_fast: clock,
+        \\    in rst_fast: reset,
+        \\    in clk_slow: clock,
+        \\    in rst_slow: reset,
+        \\    out ready: u1,
+        \\    reg r_fast: u8 = 0;
+        \\    reg r_slow: u8 = 0;
+        \\    comb {
+        \\        r_fast := r_fast +% 1;
+        \\        r_slow := r_slow +% 1;
+        \\        ready = (r_fast >= 5);
+        \\    }
+        \\};
+        \\
+        \\test "MultiClockExplicitTB" {
+        \\    var clk_fast = clock(100MHz);
+        \\    var rst_fast = reset();
+        \\    var clk_slow = clock(10MHz);
+        \\    var rst_slow = reset();
+        \\    wire ready: u1;
+        \\
+        \\    const dut = MultiClockDevice.instantiate(.{
+        \\        .clk_fast = clk_fast,
+        \\        .rst_fast = rst_fast,
+        \\        .clk_slow = clk_slow,
+        \\        .rst_slow = rst_slow,
+        \\        .ready = ready,
+        \\    });
+        \\
+        \\    sim {
+        \\        rst_fast.pulse(3, clk_fast);
+        \\        rst_slow.pulse(2, clk_slow);
+        \\        clk_fast.wait_until(ready == 1, 20);
+        \\        assert(ready == 1, "ready should be high");
+        \\        finish();
+        \\    }
+        \\}
+    ;
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "repeat (3) @(posedge clk_fast);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "repeat (2) @(posedge clk_slow);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "repeat (20) @(posedge clk_fast);") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
 
 
 

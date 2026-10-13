@@ -152,8 +152,8 @@ pub module RiscvDecoder {
 }
 
 test "RiscvDecoder decodes and executes RV32I instructions" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
     wire pc: u32;
     wire instr: u32;
     wire rs1_data: u32;

@@ -25,8 +25,8 @@ pub const Counter = module {
 };
 
 test "Counter increments and rolls over at 255" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
     wire en: u1;
     wire count: u8;
     wire overflow: u1;
@@ -41,11 +41,10 @@ test "Counter increments and rolls over at 255" {
         .rev_nibble = rev_nibble,
     });
 
-    clk.generate(100MHz);
     trace("counter_tb.vcd");
 
     // Reset the counter
-    rst.pulse(2);
+    rst.pulse(2, clk);
     assert(count == 0, "Counter should be 0 out of reset");
 
     // Enable count and step 10 cycles

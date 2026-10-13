@@ -2285,8 +2285,8 @@ pub const Parser = struct {
             return e;
         }
 
-        // Identifier or Named struct init: MyStruct{ .field1 = val1, ... }
-        if (self.check(.identifier)) {
+        // Identifier, keyword call (clock, reset), or Named struct init: MyStruct{ .field1 = val1, ... }
+        if (self.check(.identifier) or self.check(.kw_clock) or self.check(.kw_reset)) {
             const name = self.current.slice;
             const id_loc = self.current.loc;
             self.advance();

@@ -122,8 +122,8 @@ pub module RiscvDiv {
 }
 
 test "RiscvDivTb" {
-    wire clk: clock;
-    wire resetn: reset(.low);
+    var clk = clock(100MHz);
+    var resetn = reset(.active_low);
 
     wire pcpi_valid: u1 = 0;
     wire pcpi_insn: u32 = 0;
@@ -149,8 +149,7 @@ test "RiscvDivTb" {
     });
 
     sim {
-        clk.generate(100MHz);
-        resetn.pulse(5);
+        resetn.pulse(5, clk);
         clk.step(5);
 
         // Test 1: DIVU 100 / 7 = 14 (0x0E)

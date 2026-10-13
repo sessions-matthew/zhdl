@@ -65,8 +65,8 @@ pub module AxisFifo {
 }
 
 test "AxisFifo burst push, full, burst pop, and concurrent streaming testbench" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
 
     wire s_axis_tdata: u8 = 0;
     wire s_axis_tvalid: u1 = 0;
@@ -94,8 +94,7 @@ test "AxisFifo burst push, full, burst pop, and concurrent streaming testbench" 
         .count = count,
     });
 
-    clk.generate(100MHz);
-    rst.pulse(2);
+    rst.pulse(2, clk);
 
     // Initial state after reset
     assert(empty == 1, "FIFO should be empty after reset");

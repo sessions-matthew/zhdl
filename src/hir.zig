@@ -242,7 +242,6 @@ pub const HirClockEdge = enum {
 pub const HirSimStmtTag = enum {
     assign,
     step,
-    clk_generate,
     rst_pulse,
     delay,
     assert_stmt,
@@ -264,14 +263,9 @@ pub const HirSimStmt = struct {
             cycles: u64,
             edge: HirClockEdge = .posedge,
         },
-        clk_generate: struct {
-            clk_name: []const u8,
-            period_ns: u64,
-            half_period_str: []const u8 = "",
-            raw: []const u8 = "",
-        },
         rst_pulse: struct {
             rst_name: []const u8,
+            clk_name: ?[]const u8 = null,
             cycles: ?u64 = null,
             duration_raw: ?[]const u8 = null,
             active_low: bool,
@@ -295,6 +289,7 @@ pub const HirSimStmt = struct {
             cond: *HirExpr,
             max_cycles: ?u64,
             timeout_raw: ?[]const u8 = null,
+            clk_name: ?[]const u8 = null,
         },
         finish: void,
     },

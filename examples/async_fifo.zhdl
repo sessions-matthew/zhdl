@@ -61,14 +61,14 @@ pub module AsyncFifo {
 }
 
 test "AsyncFifo writes at 100MHz and reads at 33MHz across clock domains" {
-    wire wr_clk: clock;
-    wire wr_rst_n: reset(.low);
+    var wr_clk = clock(100MHz);
+    var wr_rst_n = reset(.active_low);
     wire wr_en: u1;
     wire wr_data: u16;
     wire full: u1;
 
-    wire rd_clk: clock;
-    wire rd_rst_n: reset(.low);
+    var rd_clk = clock(33MHz);
+    var rd_rst_n = reset(.active_low);
     wire rd_en: u1;
     wire rd_data: u16;
     wire empty: u1;
@@ -86,9 +86,6 @@ test "AsyncFifo writes at 100MHz and reads at 33MHz across clock domains" {
         .empty = empty,
     });
 
-    // 1. Generate independent asynchronous clocks
-    wr_clk.generate(100MHz); // 10ns period
-    rd_clk.generate(33MHz);  // ~30ns period
     trace("async_fifo_tb.vcd");
 
     // 2. Reset both domains simultaneously

@@ -61,8 +61,8 @@ pub module SignedDspMac {
 }
 
 test "SignedDspMac handles signed arithmetic, negative products, and saturation" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
 
     wire sample_in: i16;
     wire coeff: i8;
@@ -86,8 +86,7 @@ test "SignedDspMac handles signed arithmetic, negative products, and saturation"
     });
 
     trace("signed_dsp_tb.vcd");
-    clk.generate(100MHz);
-    rst.pulse(2);
+    rst.pulse(2, clk);
 
     // 1. Multiply positive sample (1000) by positive coeff (64, i.e. 0.5 in Q1.7)
     // 1000 * 64 = 64000. Scaled: 64000 >> 7 = 500.

@@ -208,8 +208,8 @@ pub module Sha256Core {
 }
 
 test "Sha256Core NIST FIPS 180-4 standard vector 'abc'" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
 
     wire start: u1 = 0;
     wire first_block: u1 = 1;
@@ -230,8 +230,7 @@ test "Sha256Core NIST FIPS 180-4 standard vector 'abc'" {
         .digest = digest,
     });
 
-    clk.generate(100MHz);
-    rst.pulse(2);
+    rst.pulse(2, clk);
 
     // Verify ready high after reset
     assert(ready == 1, "Core should be ready after reset");

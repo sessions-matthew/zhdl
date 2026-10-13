@@ -88,8 +88,8 @@ pub module NetworkPacketEngine {
 }
 
 test "NetworkPacketEngine performs byteSwap, bitReverse, and unrolled parity" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
     wire net_word: u32;
     wire net_byte: u8;
     wire process_en: u1;
@@ -112,8 +112,7 @@ test "NetworkPacketEngine performs byteSwap, bitReverse, and unrolled parity" {
     });
 
     trace("network_packet_tb.vcd");
-    clk.generate(100MHz);
-    rst.pulse(2);
+    rst.pulse(2, clk);
 
     // 1. Process 32-bit big-endian IP 192.168.1.100 (0xC0A80164)
     net_word = 32'hC0A80164;

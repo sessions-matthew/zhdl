@@ -179,8 +179,8 @@ pub module Am335xTimer {
 }
 
 test "Am335xTimer OCP bus, compare match IRQ, and soft reset" {
-    wire clk: clock;
-    wire rst_n: reset(.low);
+    var clk = clock(100MHz);
+    var rst_n = reset(.active_low);
 
     wire cs: u1;
     wire rd_en: u1;
@@ -204,10 +204,9 @@ test "Am335xTimer OCP bus, compare match IRQ, and soft reset" {
         .irq_out = irq_out,
     });
 
-    clk.generate(100MHz);
     trace("am335x_timer_tb.vcd");
 
-    rst_n.pulse(2);
+    rst_n.pulse(2, clk);
 
     // 1. Read TIDR identification register at 0x00
     cs = 1;

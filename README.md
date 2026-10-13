@@ -65,8 +65,8 @@ pub module PacketFilter(comptime W: usize) {
 }
 
 test "PacketFilter processes commands" {
-    wire clk: clock;
-    wire rst_n: reset(.low);
+    var clk = clock(100MHz); // Declarative clock oscillator with frequency literal
+    var rst_n = reset(.active_low); // Declarative active-low reset
     wire cmd: Command;
     wire rx_stream: ?u8;
 
@@ -77,17 +77,16 @@ test "PacketFilter processes commands" {
         .rx_stream = rx_stream,
     });
 
-    clk.generate(100MHz); // First-class frequency literal (10ns period)
     trace("filter_tb.vcd");
     rst_n.pulse(20ns);    // Asynchronous real-time reset pulse
 
     cmd = Command{ .ping = 0xA5 };
-    clk.step();           // Synchronous 1-cycle clock step
+    clk.step(1);          // Synchronous clock step method
     assert(rx_stream.valid == 1, "Should be valid");
     assert(rx_stream.data == 0xA5, "Should echo ping");
 
     cmd = Command{ .idle = 0 };
-    clk.step();
+    clk.step(1);
     assert(rx_stream.valid == 0, "Should be idle/null");
     finish();
 }
@@ -287,7 +286,7 @@ wire busy = state.isBusy();
 ## Simulation & Testbench Primitives
 
 ZHdl provides first-class verification primitives matching modern cycle-accurate and time-based testing workflows:
-- **Frequency Literals (`100MHz`, `50MHz`, `1GHz`, `32kHz`)**: Sub-nanosecond precision clock generators (`clk.generate(100MHz)`).
+- **Frequency Literals (`100MHz`, `50MHz`, `1GHz`, `32kHz`)**: Sub-nanosecond precision clock generators (`var clk = clock(100MHz);`).
 - **Signal-Centric Stepping**: Synchronous edge advancement (`clk.step(5)`, `clk.posedge()`, `clk.negedge()`).
 - **Dual-Mode Reset Pulses**: Cycle-based (`rst.pulse(2)`) and physical duration-based (`rst.pulse(20ns)`).
 - **Timeout Assertions**: Bounded event detection (`wait_for(cond, 100ns)`, `wait_for(cond, 50)`).

@@ -44,8 +44,8 @@ pub module FSM {
 }
 
 test "FSM cycles through idle, read, write, and done states" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
     wire start: u1;
     wire busy: u1;
     wire done_pulse: u1;
@@ -58,11 +58,10 @@ test "FSM cycles through idle, read, write, and done states" {
         .done_pulse = done_pulse,
     });
 
-    clk.generate(100MHz);
     trace("fsm_tb.vcd");
 
     // Assert reset
-    rst.pulse(2);
+    rst.pulse(2, clk);
     assert(busy == 0, "FSM should not be busy out of reset");
     assert(done_pulse == 0, "FSM should not assert done out of reset");
 

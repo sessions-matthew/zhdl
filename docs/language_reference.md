@@ -1040,8 +1040,8 @@ A testbench declares test wires, instantiates the Device Under Test (DUT), and e
 
 ```zig
 test "Counter increments and rolls over at 255" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz); // 100 MHz clock (10ns period)
+    var rst = reset();       // Active-high reset (or reset(.active_low))
     wire en: u1;
     wire count: u8;
 
@@ -1053,14 +1053,13 @@ test "Counter increments and rolls over at 255" {
     });
 
     trace("counter_tb.vcd");
-    clk.generate(10);     // 50 MHz clock (10ns period)
-    rst.pulse(2);         // Hold reset for 2 cycles
+    rst.pulse(2, clk);       // Hold reset for 2 cycles of clk
     
     en = 1;
-    step(clk, 10);
+    clk.step(10);
     assert(count == 10, "Counter should reach 10 after 10 enabled cycles");
 
-    step(clk, 246);
+    clk.step(246);
     assert(count == 0, "Counter should roll over to 0 after 256 cycles");
 
     finish();
@@ -1069,17 +1068,20 @@ test "Counter increments and rolls over at 255" {
 
 ### 11.2 Simulation Procedures & Optional `sim` Blocks
 
-Procedural stimulus statements execute sequentially in time. They can be written directly inside the testbench body or grouped into an explicit `sim { ... }` block for scoping or backwards compatibility. In either style, variable declarations (`var step_val: u8 = 5;`), compile-time loops (`inline for (...) |i| { ... }`), and hardware assertions run sequentially.
+Procedural stimulus statements execute sequentially in time. They can be written directly inside the testbench body or grouped into an explicit `sim { ... }` block for scoping. In either style, variable declarations (`var step_val: u8 = 5;`), compile-time loops (`inline for (...) |i| { ... }`), and hardware assertions run sequentially.
 
 ### 11.3 Timing and Verification Primitives
 
-ZHdl supports both cycle-accurate synchronous testing and time-based testing with typed physical units (`ps`, `ns`, `us`, `ms`, `s`):
+ZHdl enforces declarative clock and reset initialization and signal-centric simulation verbs:
 
 | Simulation Primitive | Description | Generated SystemVerilog |
 |---|---|---|
-| `clk.generate(10ns)` / `(10)` | Spawns an oscillating clock generator with half-period toggling | `always #5ns clk = ~clk;` |
-| `rst.pulse(cycles)` | Asserts reset active, waits $N$ clock cycles, then deasserts | Procedural reset sequence |
-| `step(clk, cycles)` | Synchronously advances simulation by $N$ rising clock edges | `repeat (cycles) @(posedge clk);` |
+| `var clk = clock(100MHz)` / `clock(10ns)` | Declaratively spawns an oscillating clock generator at testbench scope | `always #5ns clk = ~clk;` |
+| `var rst = reset()` / `reset(.active_low)` | Declaratively defines a reset signal initialized to its inactive state | `logic rst = 0;` / `1;` |
+| `rst.pulse(cycles, clk)` / `rst.pulse(20ns)` | Asserts reset active, waits $N$ cycles on clock domain (or physical duration), then deasserts | Procedural reset sequence |
+| `clk.step(cycles)` | Synchronously advances simulation by $N$ rising edges of `clk` | `repeat (cycles) @(posedge clk);` |
+| `clk.posedge()` / `clk.negedge()` | Waits for the next rising or falling edge of `clk` | `@(posedge clk);` / `@(negedge clk);` |
+| `clk.wait_until(cond, timeout)` | Synchronously waits until `cond` is true on `clk` rising edges up to `timeout` cycles | Bounded cycle-accurate wait loop |
 | `delay(50ns)` / `delay(10us)` | Explicit physical delay with typed time units (`ps`, `ns`, `us`, `ms`, `s`) | `#50ns;` / `#10us;` |
 | `wait_for(cond, timeout)` | Waits until `cond` is asserted or fails after `timeout` (time or cycles) | `fork ... wait (cond); ... #timeout; ... join_any` |
 | `assert_within(cond, timeout)` | Asserts `cond` occurs within physical timeout or cycle limit | Bounded assertion verification |
@@ -1088,12 +1090,14 @@ ZHdl supports both cycle-accurate synchronous testing and time-based testing wit
 | `finish()` | Terminates simulation successfully | `$finish;` |
 
 #### Typed Time Literals
-Time quantities in `sim` blocks support standard physical units:
+Time quantities in testbenches support standard physical units:
 ```zig
-sim {
-    clk.generate(10ns);    // 100 MHz clock
+test "PacketRxTb" {
+    var clk = clock(100MHz);
+    var rst = reset();
+
     trace("wave.vcd");
-    rst.pulse(2);
+    rst.pulse(2, clk);
 
     delay(250ps);          // Sub-nanosecond setup time modeling
     delay(50ns);           // Nanosecond timing

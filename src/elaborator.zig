@@ -2212,6 +2212,21 @@ pub const Elaborator = struct {
                 }
             } else if (item.tag == .const_decl) {
                 const c = item.data.const_decl;
+                if (isClockCall(c.val)) {
+                    std.debug.print(
+                        \\
+                        \\======================================================================
+                        \\COMPILE ERROR: Clock Generator Inside Synthesizable Module '{s}'
+                        \\======================================================================
+                        \\Clock generators 'clock(...)' can only be declared inside a testbench.
+                        \\Synthesizable modules must declare clock inputs as ports:
+                        \\
+                        \\    in {s}: clock,
+                        \\======================================================================
+                        \\
+                        , .{ mod_name, c.name });
+                    return error.ClockGenInModule;
+                }
                 if (c.type_annot) |ta| {
                     const h_type = self.lowerType(ta) catch null;
                     if (h_type) |ht| {
@@ -2220,6 +2235,21 @@ pub const Elaborator = struct {
                 }
             } else if (item.tag == .stmt and item.data.stmt.tag == .var_decl) {
                 const vd = item.data.stmt.data.var_decl;
+                if (isClockCall(vd.init_val)) {
+                    std.debug.print(
+                        \\
+                        \\======================================================================
+                        \\COMPILE ERROR: Clock Generator Inside Synthesizable Module '{s}'
+                        \\======================================================================
+                        \\Clock generators 'clock(...)' can only be declared inside a testbench.
+                        \\Synthesizable modules must declare clock inputs as ports:
+                        \\
+                        \\    in {s}: clock,
+                        \\======================================================================
+                        \\
+                        , .{ mod_name, vd.name });
+                    return error.ClockGenInModule;
+                }
                 if (vd.type_annot) |ta| {
                     const h_type = self.lowerType(ta) catch null;
                     if (h_type) |ht| {
@@ -2630,8 +2660,34 @@ pub const Elaborator = struct {
                     if (self.resolveGenericCall(c.val, items) != null) {
                         // generic module alias - skip
                     } else if (c.val.tag == .type_expr) {
+                    } else if (isClockCall(c.val)) {
+                        const cg = try extractClockGen(alloc, c.name, c.val);
+                        try clock_gens.append(cg);
+                        const h_type: hir.HirType = .{ .tag = .clock, .width = 1 };
+                        try signals.append(.{ .name = c.name, .hir_type = h_type });
+                        try signal_types.put(c.name, h_type);
+                    } else if (isResetCall(c.val)) {
+                        const is_active_low = extractResetPolarity(c.val);
+                        const h_type: hir.HirType = .{ .tag = .reset, .width = 1, .is_active_low = is_active_low };
+                        try signals.append(.{ .name = c.name, .hir_type = h_type });
+                        try signal_types.put(c.name, h_type);
                     } else if (c.type_annot) |ta| {
                         const h_type = try self.lowerType(ta);
+                        if (h_type.tag == .clock) {
+                            std.debug.print(
+                                \\
+                                \\======================================================================
+                                \\COMPILE ERROR: Uninitialized Clock Declaration '{s}'
+                                \\======================================================================
+                                \\Clocks must be initialized declaratively with a frequency or period:
+                                \\
+                                \\    var {s} = clock(100MHz);
+                                \\    // or: wire {s} = clock(10ns);
+                                \\======================================================================
+                                \\
+                                , .{ c.name, c.name, c.name });
+                            return error.UninitializedClock;
+                        }
                         try signals.append(.{ .name = c.name, .hir_type = h_type });
                         try signal_types.put(c.name, h_type);
                     } else if (c.val.tag == .number) {
@@ -2651,9 +2707,83 @@ pub const Elaborator = struct {
                 .stmt => {
                     if (item.data.stmt.tag == .var_decl) {
                         const vd = item.data.stmt.data.var_decl;
-                        const h_type: hir.HirType = if (vd.type_annot) |ta| try self.lowerType(ta) else .{ .tag = .bits, .width = 32 };
-                        try signals.append(.{ .name = vd.name, .hir_type = h_type });
-                        try signal_types.put(vd.name, h_type);
+                        if (isClockCall(vd.init_val)) {
+                            const cg = try extractClockGen(alloc, vd.name, vd.init_val);
+                            try clock_gens.append(cg);
+                            const h_type: hir.HirType = .{ .tag = .clock, .width = 1 };
+                            try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                            try signal_types.put(vd.name, h_type);
+                        } else if (isResetCall(vd.init_val)) {
+                            const is_active_low = extractResetPolarity(vd.init_val);
+                            const h_type: hir.HirType = .{ .tag = .reset, .width = 1, .is_active_low = is_active_low };
+                            try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                            try signal_types.put(vd.name, h_type);
+                        } else if (vd.type_annot) |ta| {
+                            const h_type = try self.lowerType(ta);
+                            if (h_type.tag == .clock) {
+                                std.debug.print(
+                                    \\
+                                    \\======================================================================
+                                    \\COMPILE ERROR: Uninitialized Clock Declaration '{s}'
+                                    \\======================================================================
+                                    \\Clocks must be initialized declaratively with a frequency or period:
+                                    \\
+                                    \\    var {s} = clock(100MHz);
+                                    \\    // or: wire {s} = clock(10ns);
+                                    \\======================================================================
+                                    \\
+                                    , .{ vd.name, vd.name, vd.name });
+                                return error.UninitializedClock;
+                            }
+                            try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                            try signal_types.put(vd.name, h_type);
+                        } else {
+                            const h_type: hir.HirType = .{ .tag = .bits, .width = 32 };
+                            try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                            try signal_types.put(vd.name, h_type);
+                        }
+                    }
+                },
+                .sim_block => {
+                    for (item.data.sim_block.stmts) |s| {
+                        if (s.tag == .var_decl) {
+                            const vd = s.data.var_decl;
+                            if (isClockCall(vd.init_val)) {
+                                const cg = try extractClockGen(alloc, vd.name, vd.init_val);
+                                try clock_gens.append(cg);
+                                const h_type: hir.HirType = .{ .tag = .clock, .width = 1 };
+                                try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                                try signal_types.put(vd.name, h_type);
+                            } else if (isResetCall(vd.init_val)) {
+                                const is_active_low = extractResetPolarity(vd.init_val);
+                                const h_type: hir.HirType = .{ .tag = .reset, .width = 1, .is_active_low = is_active_low };
+                                try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                                try signal_types.put(vd.name, h_type);
+                            } else if (vd.type_annot) |ta| {
+                                const h_type = try self.lowerType(ta);
+                                if (h_type.tag == .clock) {
+                                    std.debug.print(
+                                        \\
+                                        \\======================================================================
+                                        \\COMPILE ERROR: Uninitialized Clock Declaration '{s}'
+                                        \\======================================================================
+                                        \\Clocks must be initialized declaratively with a frequency or period:
+                                        \\
+                                        \\    var {s} = clock(100MHz);
+                                        \\    // or: wire {s} = clock(10ns);
+                                        \\======================================================================
+                                        \\
+                                        , .{ vd.name, vd.name, vd.name });
+                                    return error.UninitializedClock;
+                                }
+                                try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                                try signal_types.put(vd.name, h_type);
+                            } else {
+                                const h_type: hir.HirType = .{ .tag = .bits, .width = 32 };
+                                try signals.append(.{ .name = vd.name, .hir_type = h_type });
+                                try signal_types.put(vd.name, h_type);
+                            }
+                        }
                     }
                 },
                 else => {},
@@ -2760,7 +2890,7 @@ pub const Elaborator = struct {
                 }
             } else if (item.tag == .const_decl) {
                 const c = item.data.const_decl;
-                if (c.val.tag != .type_expr and self.resolveGenericCall(c.val, items) == null) {
+                if (c.val.tag != .type_expr and self.resolveGenericCall(c.val, items) == null and !isClockCall(c.val) and !isResetCall(c.val)) {
                     if (c.type_annot != null) {
                         const is_zero = (c.val.tag == .number and c.val.data.number.val == 0);
                         if (!is_zero) {
@@ -2880,6 +3010,95 @@ pub const Elaborator = struct {
             half_str = try std.fmt.allocPrint(alloc, "{d}ps", .{half_ps});
         }
         return .{ .period_ns = period_ns, .half_str = half_str };
+    }
+
+    fn isClockCall(val: *ast.Expr) bool {
+        if (val.tag == .call) {
+            const callee = val.data.call.callee;
+            if (callee.tag == .identifier and std.mem.eql(u8, callee.data.identifier, "clock")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn isResetCall(val: *ast.Expr) bool {
+        if (val.tag == .call) {
+            const callee = val.data.call.callee;
+            if (callee.tag == .identifier and std.mem.eql(u8, callee.data.identifier, "reset")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn extractClockGen(alloc: std.mem.Allocator, clk_name: []const u8, val: *ast.Expr) !hir.HirClockGen {
+        var period: u64 = 10;
+        var raw_str: []const u8 = "10ns";
+        var half_str: []const u8 = "5ns";
+        const c = val.data.call;
+        if (c.args.len > 0) {
+            const p = c.args[0];
+            if (p.tag == .freq_literal) {
+                const fc = try convertFreqToPeriod(alloc, p.data.freq_literal);
+                period = fc.period_ns;
+                half_str = fc.half_period_str;
+                raw_str = p.data.freq_literal.raw;
+            } else if (p.tag == .time_literal) {
+                const tc = try convertTimeToHalfPeriodStr(alloc, p.data.time_literal);
+                period = tc.period_ns;
+                half_str = tc.half_str;
+                raw_str = p.data.time_literal.raw;
+            } else if (p.tag == .number) {
+                period = p.data.number.val;
+                const half = if (period >= 2) period / 2 else 1;
+                half_str = try std.fmt.allocPrint(alloc, "{d}ns", .{half});
+                raw_str = try std.fmt.allocPrint(alloc, "{d}ns", .{period});
+            }
+        } else {
+            std.debug.print(
+                \\
+                \\======================================================================
+                \\COMPILE ERROR: Missing Frequency/Period for Clock '{s}'
+                \\======================================================================
+                \\Clock constructor requires a frequency or time literal argument:
+                \\
+                \\    var {s} = clock(100MHz);
+                \\    // or: var {s} = clock(10ns);
+                \\======================================================================
+                \\
+                , .{ clk_name, clk_name, clk_name });
+            return error.MissingClockFrequency;
+        }
+        return .{
+            .clk_name = clk_name,
+            .period_ns = period,
+            .half_period_str = half_str,
+            .raw = raw_str,
+        };
+    }
+
+    fn extractResetPolarity(val: *ast.Expr) bool {
+        const c = val.data.call;
+        if (c.args.len > 0) {
+            const arg = c.args[0];
+            if (arg.tag == .enum_literal) {
+                const lit = arg.data.enum_literal;
+                if (std.mem.eql(u8, lit, "low") or std.mem.eql(u8, lit, "active_low")) {
+                    return true;
+                } else if (std.mem.eql(u8, lit, "high") or std.mem.eql(u8, lit, "active_high")) {
+                    return false;
+                }
+            } else if (arg.tag == .identifier) {
+                const id = arg.data.identifier;
+                if (std.mem.eql(u8, id, "low") or std.mem.eql(u8, id, "active_low")) {
+                    return true;
+                } else if (std.mem.eql(u8, id, "high") or std.mem.eql(u8, id, "active_high")) {
+                    return false;
+                }
+            }
+        }
+        return false;
     }
 
     fn hasDotNext(target: *const ast.Expr) bool {
@@ -3241,46 +3460,48 @@ pub const Elaborator = struct {
                         if (ma.target.tag == .identifier) {
                             const obj_name = ma.target.data.identifier;
                             if (std.mem.eql(u8, ma.field, "generate")) {
-                                var period: u64 = 10;
-                                var raw_str: []const u8 = "10ns";
-                                var half_str: []const u8 = "5ns";
+                                std.debug.print(
+                                    \\
+                                    \\======================================================================
+                                    \\COMPILE ERROR: Deprecated 'clk.generate()' Syntax
+                                    \\======================================================================
+                                    \\Procedural 'clk.generate(...)' is deprecated and no longer supported.
+                                    \\In ZHdl, clocks must be declared declaratively upfront at testbench scope:
+                                    \\
+                                    \\    var {s} = clock(100MHz);
+                                    \\    // or: wire {s} = clock(10ns);
+                                    \\======================================================================
+                                    \\
+                                    , .{ obj_name, obj_name });
+                                return error.DeprecatedClockGenerate;
+                            } else if (std.mem.eql(u8, ma.field, "wait_until")) {
                                 if (c.args.len > 0) {
-                                    const p = c.args[0];
-                                    if (p.tag == .freq_literal) {
-                                        const fc = try convertFreqToPeriod(alloc, p.data.freq_literal);
-                                        period = fc.period_ns;
-                                        half_str = fc.half_period_str;
-                                        raw_str = p.data.freq_literal.raw;
-                                    } else if (p.tag == .time_literal) {
-                                        const tc = try convertTimeToHalfPeriodStr(alloc, p.data.time_literal);
-                                        period = tc.period_ns;
-                                        half_str = tc.half_str;
-                                        raw_str = p.data.time_literal.raw;
-                                    } else if (p.tag == .number) {
-                                        period = p.data.number.val;
-                                        const half = if (period >= 2) period / 2 else 1;
-                                        half_str = try std.fmt.allocPrint(alloc, "{d}ns", .{half});
-                                        raw_str = try std.fmt.allocPrint(alloc, "{d}ns", .{period});
+                                    const cond = try self.lowerExpr(alloc, c.args[0], reg_map, signal_types);
+                                    var max_cycles: ?u64 = null;
+                                    var timeout_raw: ?[]const u8 = null;
+                                    if (c.args.len >= 2) {
+                                        const timeout = c.args[1];
+                                        if (timeout.tag == .time_literal) {
+                                            timeout_raw = timeout.data.time_literal.raw;
+                                            max_cycles = null;
+                                        } else if (timeout.tag == .number) {
+                                            max_cycles = timeout.data.number.val;
+                                            timeout_raw = null;
+                                        }
                                     }
-                                }
-                                try clock_gens.append(.{
-                                    .clk_name = obj_name,
-                                    .period_ns = period,
-                                    .half_period_str = half_str,
-                                    .raw = raw_str,
-                                });
-                                try sim_stmts.append(.{
-                                    .tag = .clk_generate,
-                                    .data = .{
-                                        .clk_generate = .{
-                                            .clk_name = obj_name,
-                                            .period_ns = period,
-                                            .half_period_str = half_str,
-                                            .raw = raw_str,
+                                    try sim_stmts.append(.{
+                                        .tag = .wait_for,
+                                        .data = .{
+                                            .wait_for = .{
+                                                .cond = cond,
+                                                .max_cycles = max_cycles,
+                                                .timeout_raw = timeout_raw,
+                                                .clk_name = obj_name,
+                                            },
                                         },
-                                    },
-                                });
-                                return;
+                                    });
+                                    return;
+                                }
                             } else if (std.mem.eql(u8, ma.field, "step")) {
                                 var cycles: u64 = 1;
                                 if (c.args.len > 0 and c.args[0].tag == .number) {
@@ -3332,6 +3553,7 @@ pub const Elaborator = struct {
                             } else if (std.mem.eql(u8, ma.field, "pulse")) {
                                 var cycles: ?u64 = null;
                                 var duration_raw: ?[]const u8 = null;
+                                var clk_name: ?[]const u8 = null;
                                 if (c.args.len > 0) {
                                     if (c.args[0].tag == .time_literal) {
                                         duration_raw = c.args[0].data.time_literal.raw;
@@ -3347,7 +3569,9 @@ pub const Elaborator = struct {
                                     active_low = st.is_active_low;
                                 }
                                 if (c.args.len > 1) {
-                                    if (c.args[1].tag == .enum_literal) {
+                                    if (c.args[1].tag == .identifier) {
+                                        clk_name = c.args[1].data.identifier;
+                                    } else if (c.args[1].tag == .enum_literal) {
                                         const lit = c.args[1].data.enum_literal;
                                         if (std.mem.eql(u8, lit, "low") or std.mem.eql(u8, lit, "active_low")) {
                                             active_low = true;
@@ -3356,11 +3580,17 @@ pub const Elaborator = struct {
                                         }
                                     }
                                 }
+                                if (c.args.len > 2 and clk_name == null) {
+                                    if (c.args[2].tag == .identifier) {
+                                        clk_name = c.args[2].data.identifier;
+                                    }
+                                }
                                 try sim_stmts.append(.{
                                     .tag = .rst_pulse,
                                     .data = .{
                                         .rst_pulse = .{
                                             .rst_name = obj_name,
+                                            .clk_name = clk_name,
                                             .cycles = cycles,
                                             .duration_raw = duration_raw,
                                             .active_low = active_low,
@@ -3439,66 +3669,46 @@ pub const Elaborator = struct {
                     } else if (c.callee.tag == .identifier) {
                         const fn_name = c.callee.data.identifier;
                         if (std.mem.eql(u8, fn_name, "step")) {
-                            var clk_name: ?[]const u8 = null;
-                            var cycles: u64 = 1;
-                            if (c.args.len == 1) {
-                                if (c.args[0].tag == .number) {
-                                    cycles = c.args[0].data.number.val;
-                                } else if (c.args[0].tag == .identifier) {
-                                    clk_name = c.args[0].data.identifier;
-                                    cycles = 1;
-                                }
-                            } else if (c.args.len >= 2) {
-                                if (c.args[0].tag == .identifier) {
-                                    clk_name = c.args[0].data.identifier;
-                                }
-                                if (c.args[1].tag == .number) {
-                                    cycles = c.args[1].data.number.val;
-                                }
-                            }
-                            try sim_stmts.append(.{
-                                .tag = .step,
-                                .data = .{
-                                    .step = .{
-                                        .clk_name = clk_name,
-                                        .cycles = cycles,
-                                        .edge = .posedge,
-                                    },
-                                },
-                            });
-                            return;
+                            std.debug.print(
+                                \\
+                                \\======================================================================
+                                \\COMPILE ERROR: Deprecated Global 'step()' Call
+                                \\======================================================================
+                                \\Global 'step(...)' is deprecated and not permitted.
+                                \\In ZHdl, clock stepping is a method on the clock signal:
+                                \\    clk.step(N);
+                                \\    clk.posedge();
+                                \\    clk.negedge();
+                                \\======================================================================
+                                \\
+                                , .{});
+                            return error.DeprecatedGlobalStep;
                         } else if (std.mem.eql(u8, fn_name, "posedge")) {
-                            const clk_name: ?[]const u8 = if (c.args.len > 0 and c.args[0].tag == .identifier)
-                                c.args[0].data.identifier
-                            else
-                                null;
-                            try sim_stmts.append(.{
-                                .tag = .step,
-                                .data = .{
-                                    .step = .{
-                                        .clk_name = clk_name,
-                                        .cycles = 1,
-                                        .edge = .posedge,
-                                    },
-                                },
-                            });
-                            return;
+                            std.debug.print(
+                                \\
+                                \\======================================================================
+                                \\COMPILE ERROR: Deprecated Global 'posedge()' Call
+                                \\======================================================================
+                                \\Global 'posedge(...)' is deprecated and not permitted.
+                                \\In ZHdl, edge stepping is a method on the clock signal:
+                                \\    clk.posedge();
+                                \\======================================================================
+                                \\
+                                , .{});
+                            return error.DeprecatedGlobalPosedge;
                         } else if (std.mem.eql(u8, fn_name, "negedge")) {
-                            const clk_name: ?[]const u8 = if (c.args.len > 0 and c.args[0].tag == .identifier)
-                                c.args[0].data.identifier
-                            else
-                                null;
-                            try sim_stmts.append(.{
-                                .tag = .step,
-                                .data = .{
-                                    .step = .{
-                                        .clk_name = clk_name,
-                                        .cycles = 1,
-                                        .edge = .negedge,
-                                    },
-                                },
-                            });
-                            return;
+                            std.debug.print(
+                                \\
+                                \\======================================================================
+                                \\COMPILE ERROR: Deprecated Global 'negedge()' Call
+                                \\======================================================================
+                                \\Global 'negedge(...)' is deprecated and not permitted.
+                                \\In ZHdl, edge stepping is a method on the clock signal:
+                                \\    clk.negedge();
+                                \\======================================================================
+                                \\
+                                , .{});
+                            return error.DeprecatedGlobalNegedge;
                         } else if (std.mem.eql(u8, fn_name, "assert")) {
                             if (c.args.len > 0) {
                                 const cond = try self.lowerExpr(alloc, c.args[0], reg_map, signal_types);
@@ -3618,6 +3828,7 @@ pub const Elaborator = struct {
             },
             .var_decl => {
                 const vd = stmt.data.var_decl;
+                if (isClockCall(vd.init_val) or isResetCall(vd.init_val)) return;
                 const target = try alloc.create(hir.HirExpr);
                 const h_type = signal_types.get(vd.name) orelse hir.HirType{ .tag = .bits, .width = 32 };
                 target.* = .{

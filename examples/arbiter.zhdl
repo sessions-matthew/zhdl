@@ -72,8 +72,8 @@ pub module RoundRobinArbiter {
 }
 
 test "RoundRobinArbiterTb" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
 
     wire req: u4 = 0;
     wire ack: u4 = 0;
@@ -93,8 +93,7 @@ test "RoundRobinArbiterTb" {
     });
 
     sim {
-        clk.generate(100MHz);
-        rst.pulse(5);
+        rst.pulse(5, clk);
         clk.step(2);
 
         // Initial state: no requests

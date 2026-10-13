@@ -51,8 +51,8 @@ pub module DspMac {
 }
 
 test "DspMac accumulates multiple products" {
-    wire clk: clock;
-    wire rst: reset;
+    var clk = clock(100MHz);
+    var rst = reset();
     wire clear: u1;
     wire data_a: u25;
     wire data_b: u18;
@@ -67,32 +67,31 @@ test "DspMac accumulates multiple products" {
         .accum = accum,
     });
 
-    clk.generate(100MHz);
     trace("dsp_mac_tb.vcd");
 
-    rst.pulse(2);
+    rst.pulse(2, clk);
     clear = 1;
     data_a = 0;
     data_b = 0;
-    clk.step();
+    clk.step(1);
     assert(accum == 0, "Accumulator should be cleared");
 
     clear = 0;
     // Cycle 1: present data_a = 10, data_b = 5 -> mult_result = 50
     data_a = 10;
     data_b = 5;
-    clk.step();
+    clk.step(1);
     assert(accum == 50, "Accumulator should reach 50");
 
     // Cycle 2: present data_a = 20, data_b = 3 -> mult_result = 60, accum = 50 + 60 = 110
     data_a = 20;
     data_b = 3;
-    clk.step();
+    clk.step(1);
     assert(accum == 110, "Accumulator should reach 110");
 
     // Cycle 3: clear accumulator
     clear = 1;
-    clk.step();
+    clk.step(1);
     assert(accum == 0, "Accumulator should clear to 0");
     finish();
 }
