@@ -774,6 +774,48 @@ pub const Desugarer = struct {
             }
 
             // Transform testbench helpers
+            if (tok.tag == .kw_wire) {
+                const wire_name = self.advance();
+                _ = self.matchTag(.colon);
+                const t_start = self.cursor;
+                while (self.peek().tag != .eof and self.peek().tag != .semicolon and self.peek().tag != .equal) {
+                    _ = self.advance();
+                }
+                const t_end = self.cursor;
+                const raw_type = std.mem.trim(u8, self.source[self.tokens.items[t_start].loc.offset .. self.tokens.items[t_end - 1].loc.offset + self.tokens.items[t_end - 1].slice.len], " \t\r\n");
+                const desugared_type = try self.desugarType(raw_type);
+                defer self.allocator.free(desugared_type);
+
+                var init_val: []const u8 = "undefined";
+                var has_custom_init = false;
+                if (self.matchTag(.equal)) {
+                    has_custom_init = true;
+                    const i_start = self.cursor;
+                    while (self.peek().tag != .eof and self.peek().tag != .semicolon) {
+                        _ = self.advance();
+                    }
+                    const i_end = self.cursor;
+                    init_val = std.mem.trim(u8, self.source[self.tokens.items[i_start].loc.offset .. self.tokens.items[i_end - 1].loc.offset + self.tokens.items[i_end - 1].slice.len], " \t\r\n");
+                }
+                _ = self.matchTag(.semicolon);
+                if (has_custom_init) {
+                    try self.writeFmt("var {s}: {s} = {s};\n", .{ wire_name.slice, desugared_type, init_val });
+                } else {
+                    try self.writeFmt("var {s}: {s} = undefined;\n", .{ wire_name.slice, desugared_type });
+                }
+                continue;
+            }
+
+            if (tok.tag == .kw_clock or (tok.tag == .identifier and std.mem.eql(u8, tok.slice, "clock"))) {
+                try self.write("zhdl.clock");
+                continue;
+            }
+
+            if (tok.tag == .kw_reset or (tok.tag == .identifier and std.mem.eql(u8, tok.slice, "reset"))) {
+                try self.write("zhdl.reset");
+                continue;
+            }
+
             if (tok.tag == .identifier and std.mem.eql(u8, tok.slice, "assert")) {
                 try self.write("try std.testing.expect(");
                 // If there's a second argument message, ignore or skip it
@@ -831,6 +873,35 @@ pub fn desugar(allocator: std.mem.Allocator, source: []const u8) ![:0]const u8 {
     const copy = try allocator.allocSentinel(u8, result.len, 0);
     @memcpy(copy, result);
     return copy;
+}
+
+/// Formats a valid Zig source buffer using Zig's official AST renderer (equivalent to `zig fmt`).
+pub fn formatZig(allocator: std.mem.Allocator, source: [:0]const u8) ![:0]u8 {
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
+    defer tree.deinit(allocator);
+
+    if (tree.errors.len > 0) {
+        return error.AstParseError;
+    }
+
+    const rendered = try tree.renderAlloc(allocator);
+    defer allocator.free(rendered);
+
+    const formatted = try allocator.allocSentinel(u8, rendered.len, 0);
+    @memcpy(formatted, rendered);
+    return formatted;
+}
+
+/// Desugars ZHdl source code and automatically formats it to clean, idiomatic Zig.
+pub fn desugarFormatted(allocator: std.mem.Allocator, source: []const u8) ![:0]u8 {
+    const raw = try desugar(allocator, source);
+    defer allocator.free(raw);
+
+    return formatZig(allocator, raw) catch {
+        const copy = try allocator.allocSentinel(u8, raw.len, 0);
+        @memcpy(copy, raw);
+        return copy;
+    };
 }
 
 test "desugar basic counter module produces valid Zig AST" {
@@ -1085,5 +1156,29 @@ test "Paradigm 2: Verilog-style ports in module(...) header with commas, registe
             std.debug.print("AST Error: {any}\n", .{err});
         }
     }
+    try testing.expectEqual(@as(usize, 0), tree.errors.len);
+}
+
+test "formatZig and desugarFormatted produce canonical Zig formatting" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const zhdl_src =
+        \\pub module FmtTest(in clk: clock, in rst: reset(.async), out q: u8) {
+        \\    reg r: u8 = 0;
+        \\    comb { r := r +% 1; q = r; }
+        \\}
+    ;
+
+    const formatted = try desugarFormatted(allocator, zhdl_src);
+    defer allocator.free(formatted);
+
+    // Verify it is clean, multiline formatted Zig
+    try testing.expect(std.mem.indexOf(u8, formatted, "pub const FmtTest = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "clk: zhdl.In(zhdl.Clock),") != null);
+
+    // Verify that the formatted code parses with 0 AST errors
+    var tree = try std.zig.Ast.parse(allocator, formatted, .{});
+    defer tree.deinit(allocator);
     try testing.expectEqual(@as(usize, 0), tree.errors.len);
 }

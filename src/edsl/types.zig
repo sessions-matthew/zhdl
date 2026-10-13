@@ -12,7 +12,22 @@ pub const Clock = struct {
     pub fn set(self: *@This(), v: u1) void {
         self.val = v;
     }
+
+    pub fn step(self: *@This(), cycles: usize) void {
+        _ = self;
+        _ = cycles;
+    }
 };
+
+pub fn clock(freq: anytype) Clock {
+    _ = freq;
+    return .{};
+}
+
+pub fn reset(mode: anytype) AsyncReset {
+    _ = mode;
+    return .{};
+}
 
 pub const ResetMode = enum {
     async,
@@ -50,6 +65,12 @@ pub fn Reset(comptime mode: ResetMode, comptime pol: ResetPolarity) type {
 
         pub fn isActive(self: @This()) bool {
             return if (pol == .active_low) self.val == 0 else self.val == 1;
+        }
+
+        pub fn pulse(self: *@This(), cycles: usize, clk: anytype) void {
+            _ = self;
+            _ = cycles;
+            _ = clk;
         }
     };
 }
