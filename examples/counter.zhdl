@@ -1,13 +1,13 @@
 //! Parameterized Counter with Reset, Enable, Overflow, and Downward Bit Slicing
-//! Demonstrates optional flat module syntax (no 'comb' block wrapper required).
-pub const Counter = module {
+//! Demonstrates Paradigm 2 ANSI port list with commas and body declarations with semicolons.
+pub module Counter(
     in clk: clock,
     in rst: reset(.async),
     in en: u1,
     out count: u8,
     out overflow: u1,
     out rev_nibble: u4,
-
+) {
     reg count_reg: u8 = 0;
 
     overflow = (count_reg == 255);
@@ -22,7 +22,7 @@ pub const Counter = module {
 
     // Downward bit slicing syntactic sugar: extracts lower 4 bits in reverse bit order!
     rev_nibble = count_reg[4..0];
-};
+}
 
 test "Counter increments and rolls over at 255" {
     var clk = clock(100MHz);
