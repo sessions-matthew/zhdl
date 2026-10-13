@@ -1017,6 +1017,18 @@ pub const Elaborator = struct {
                     },
                 };
             },
+            .spawn_stmt => {
+                const sp = stmt.data.spawn_stmt;
+                return .{
+                    .tag = .spawn_stmt,
+                    .loc = stmt.loc,
+                    .data = .{
+                        .spawn_stmt = .{
+                            .body = try self.cloneStatements(alloc, sp.body, substs),
+                        },
+                    },
+                };
+            },
         }
     }
 
@@ -2258,6 +2270,21 @@ pub const Elaborator = struct {
                         try signal_types.put(vd.name, ht);
                     }
                 }
+            } else if (item.tag == .stmt and item.data.stmt.tag == .spawn_stmt) {
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: 'spawn' Concurrency Inside Synthesizable Module '{s}'
+                    \\======================================================================
+                    \\'spawn' concurrency blocks are only permitted in simulation testbenches.
+                    \\Hardware modules are strictly deterministic synthesizable RTL.
+                    \\
+                    \\Fix:
+                    \\  Move 'spawn {{ ... }}' to a 'test "..." {{ ... }}' or 'sim {{ ... }}' block.
+                    \\======================================================================
+                    \\
+                    , .{mod_name});
+                return error.SpawnInModule;
             }
         }
 
@@ -3695,6 +3722,39 @@ pub const Elaborator = struct {
                                     },
                                 });
                                 return;
+                            } else if (std.mem.eql(u8, ma.field, "drive")) {
+                                if (c.args.len >= 2) {
+                                    const clk_name = obj_name;
+                                    const target = try self.lowerTargetExpr(alloc, c.args[0], false, reg_map, signal_types);
+                                    var val_expr = try self.lowerExpr(alloc, c.args[1], reg_map, signal_types);
+                                    if (val_expr.tag == .lit and target.hir_type.width > 0) {
+                                        val_expr.hir_type.width = target.hir_type.width;
+                                        if (target.hir_type.is_signed) val_expr.hir_type.is_signed = true;
+                                    } else if (val_expr.tag == .unary and val_expr.data.unary.operand.tag == .lit and target.hir_type.width > 0) {
+                                        val_expr.hir_type.width = target.hir_type.width;
+                                        val_expr.data.unary.operand.hir_type.width = target.hir_type.width;
+                                        if (target.hir_type.is_signed) {
+                                            val_expr.hir_type.is_signed = true;
+                                            val_expr.data.unary.operand.hir_type.is_signed = true;
+                                        }
+                                    }
+                                    try sim_stmts.append(.{
+                                        .tag = .clk_drive,
+                                        .data = .{
+                                            .clk_drive = .{
+                                                .clk_name = clk_name,
+                                                .target = target,
+                                                .value = val_expr,
+                                            },
+                                        },
+                                    });
+                                    return;
+                                }
+                            } else if (std.mem.eql(u8, ma.field, "sample")) {
+                                if (c.args.len >= 1) {
+                                    _ = try self.lowerExpr(alloc, c.args[0], reg_map, signal_types);
+                                    return;
+                                }
                             } else if (std.mem.eql(u8, ma.field, "assert_signal") or std.mem.eql(u8, ma.field, "assert")) {
                                 var active_low = false;
                                 if (signal_types.get(obj_name)) |st| {
@@ -3987,6 +4047,21 @@ pub const Elaborator = struct {
                     }
                 }
                 _ = self.constants.remove(loop.var_name);
+            },
+            .spawn_stmt => {
+                const sp = stmt.data.spawn_stmt;
+                var spawned_stmts = ArrayList(hir.HirSimStmt).init(alloc);
+                for (sp.body) |s| {
+                    try self.lowerSimStatement(alloc, s, &spawned_stmts, clock_gens, reg_map, signal_types);
+                }
+                try sim_stmts.append(.{
+                    .tag = .spawn,
+                    .data = .{
+                        .spawn = .{
+                            .stmts = try spawned_stmts.toOwnedSlice(),
+                        },
+                    },
+                });
             },
             else => {},
         }
@@ -4841,6 +4916,22 @@ pub const Elaborator = struct {
                 _ = self.constants.remove(loop.var_name);
             },
             .expr_stmt => {},
+            .spawn_stmt => {
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: 'spawn' Concurrency Inside Synthesizable Module
+                    \\======================================================================
+                    \\'spawn' concurrency blocks are only permitted in simulation testbenches.
+                    \\Hardware modules are strictly deterministic synthesizable RTL.
+                    \\
+                    \\Fix:
+                    \\  Move 'spawn {{ ... }}' to a 'test "..." {{ ... }}' or 'sim {{ ... }}' block.
+                    \\======================================================================
+                    \\
+                    , .{});
+                return error.SpawnInModule;
+            },
         }
     }
 
@@ -5617,6 +5708,9 @@ pub const Elaborator = struct {
 
                 if (callee.tag == .member_access) {
                     const ma = callee.data.member_access;
+                    if (std.mem.eql(u8, ma.field, "sample") and c.args.len > 0) {
+                        return try self.lowerExpr(alloc, c.args[0], reg_map, signal_types);
+                    }
                     var static_type_name: ?[]const u8 = null;
                     if (exprToDottedString(alloc, ma.target)) |target_dot| {
                         if (self.type_methods.contains(target_dot)) {
@@ -6024,6 +6118,9 @@ pub const Elaborator = struct {
                 },
                 .inline_for => {
                     try collectTargetsFromAstStatements(stmt.data.inline_for.body, out_targets);
+                },
+                .spawn_stmt => {
+                    try collectTargetsFromAstStatements(stmt.data.spawn_stmt.body, out_targets);
                 },
                 .expr_stmt => {},
             }

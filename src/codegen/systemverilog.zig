@@ -585,6 +585,216 @@ pub const SystemVerilogEmitter = struct {
         }
     }
 
+    fn emitSimStmt(
+        self: *SystemVerilogEmitter,
+        stmt: hir.HirSimStmt,
+        writer: anytype,
+        tb: hir.HirTestbench,
+        tb_mod_name: []const u8,
+        default_clk: []const u8,
+        indent_level: usize,
+    ) anyerror!void {
+        switch (stmt.tag) {
+            .trace => {
+                const t = stmt.data.trace;
+                try self.emitIndent(indent_level, writer);
+                try writer.print("$dumpfile(\"{s}\");\n", .{t.vcd_path});
+                try self.emitIndent(indent_level, writer);
+                try writer.print("$dumpvars(0, {s});\n", .{tb_mod_name});
+            },
+            .rst_pulse => {
+                const rp = stmt.data.rst_pulse;
+                const clk_to_use = rp.clk_name orelse default_clk;
+                if (rp.duration_raw) |dur| {
+                    if (rp.active_low) {
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b0;\n", .{rp.rst_name});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("#{s};\n", .{dur});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b1;\n", .{rp.rst_name});
+                    } else {
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b1;\n", .{rp.rst_name});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("#{s};\n", .{dur});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b0;\n", .{rp.rst_name});
+                    }
+                } else {
+                    const cycles = rp.cycles orelse 1;
+                    if (rp.active_low) {
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b0;\n", .{rp.rst_name});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("repeat ({d}) @(posedge {s});\n", .{ cycles, clk_to_use });
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b1;\n", .{rp.rst_name});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("@(posedge {s});\n", .{clk_to_use});
+                    } else {
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b1;\n", .{rp.rst_name});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("repeat ({d}) @(posedge {s});\n", .{ cycles, clk_to_use });
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("{s} = 1'b0;\n", .{rp.rst_name});
+                        try self.emitIndent(indent_level, writer);
+                        try writer.print("@(posedge {s});\n", .{clk_to_use});
+                    }
+                }
+            },
+            .step => {
+                const s = stmt.data.step;
+                const clk_to_use = s.clk_name orelse default_clk;
+                const edge_str = if (s.edge == .negedge) "negedge" else "posedge";
+                try self.emitIndent(indent_level, writer);
+                if (s.cycles == 1) {
+                    try writer.print("@({s} {s});\n", .{ edge_str, clk_to_use });
+                } else {
+                    try writer.print("repeat ({d}) @({s} {s});\n", .{ s.cycles, edge_str, clk_to_use });
+                }
+            },
+            .delay => {
+                const d = stmt.data.delay;
+                try self.emitIndent(indent_level, writer);
+                if (d.raw.len > 0) {
+                    try writer.print("#{s};\n", .{d.raw});
+                } else {
+                    try writer.print("#{d}ns;\n", .{d.ns});
+                }
+            },
+            .assign => {
+                const a = stmt.data.assign;
+                try self.emitIndent(indent_level, writer);
+                try self.emitExpr(a.target, writer);
+                try writer.writeAll(" = ");
+                try self.emitExpr(a.value, writer);
+                try writer.writeAll(";\n");
+            },
+            .clk_drive => {
+                const cd = stmt.data.clk_drive;
+                try self.emitIndent(indent_level, writer);
+                try self.emitExpr(cd.target, writer);
+                try writer.writeAll(" <= ");
+                try self.emitExpr(cd.value, writer);
+                try writer.writeAll(";\n");
+            },
+            .spawn => {
+                const sp = stmt.data.spawn;
+                try self.emitIndent(indent_level, writer);
+                try writer.writeAll("fork\n");
+                try self.emitIndent(indent_level + 1, writer);
+                try writer.writeAll("begin\n");
+                for (sp.stmts) |s| {
+                    try self.emitSimStmt(s, writer, tb, tb_mod_name, default_clk, indent_level + 2);
+                }
+                try self.emitIndent(indent_level + 1, writer);
+                try writer.writeAll("end\n");
+                try self.emitIndent(indent_level, writer);
+                try writer.writeAll("join_none\n");
+            },
+            .assert_stmt => {
+                const as = stmt.data.assert_stmt;
+                try self.emitIndent(indent_level, writer);
+                try writer.writeAll("if (!(");
+                try self.emitExpr(as.cond, writer);
+                try writer.writeAll(")) begin\n");
+                try self.emitIndent(indent_level + 1, writer);
+                if (as.msg) |msg| {
+                    try writer.writeAll("$error(\"[FAIL] ");
+                    for (msg) |c| {
+                        if (c == '%') {
+                            try writer.writeAll("%%");
+                        } else if (c == '"') {
+                            try writer.writeAll("\\\"");
+                        } else if (c == '\\') {
+                            try writer.writeAll("\\\\");
+                        } else {
+                            try writer.writeByte(c);
+                        }
+                    }
+                    try writer.writeAll("\");\n");
+                } else {
+                    try writer.print("$error(\"[FAIL] Assertion failed in test '{s}'\");\n", .{tb.name});
+                }
+                try self.emitIndent(indent_level + 1, writer);
+                try writer.writeAll("$fatal(1);\n");
+                try self.emitIndent(indent_level, writer);
+                try writer.writeAll("end\n");
+            },
+            .print => {
+                const p = stmt.data.print;
+                try self.emitIndent(indent_level, writer);
+                try writer.print("$display(\"{s}\");\n", .{p.fmt});
+            },
+            .wait_for => {
+                const wf = stmt.data.wait_for;
+                const clk_to_use = wf.clk_name orelse default_clk;
+                if (wf.timeout_raw) |t_raw| {
+                    try self.emitIndent(indent_level, writer);
+                    try writer.writeAll("fork\n");
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.writeAll("begin\n");
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.writeAll("wait (");
+                    try self.emitExpr(wf.cond, writer);
+                    try writer.writeAll(");\n");
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.writeAll("end\n");
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.print("begin\n", .{});
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.print("#{s};\n", .{t_raw});
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.print("$error(\"[TIMEOUT] wait_for timed out after {s}\");\n", .{t_raw});
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.print("$fatal(1);\n", .{});
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.print("end\n", .{});
+                    try self.emitIndent(indent_level, writer);
+                    try writer.writeAll("join_any\n");
+                    try self.emitIndent(indent_level, writer);
+                    try writer.writeAll("disable fork;\n");
+                } else if (wf.max_cycles) |max_c| {
+                    try self.emitIndent(indent_level, writer);
+                    try writer.writeAll("fork\n");
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.writeAll("begin\n");
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.writeAll("wait (");
+                    try self.emitExpr(wf.cond, writer);
+                    try writer.writeAll(");\n");
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.writeAll("end\n");
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.print("begin\n", .{});
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.print("repeat ({d}) @(posedge {s});\n", .{ max_c, clk_to_use });
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.print("$error(\"[TIMEOUT] wait_for timed out\");\n", .{});
+                    try self.emitIndent(indent_level + 2, writer);
+                    try writer.print("$fatal(1);\n", .{});
+                    try self.emitIndent(indent_level + 1, writer);
+                    try writer.print("end\n", .{});
+                    try self.emitIndent(indent_level, writer);
+                    try writer.writeAll("join_any\n");
+                    try self.emitIndent(indent_level, writer);
+                    try writer.writeAll("disable fork;\n");
+                } else {
+                    try self.emitIndent(indent_level, writer);
+                    try writer.writeAll("wait (");
+                    try self.emitExpr(wf.cond, writer);
+                    try writer.writeAll(");\n");
+                }
+            },
+            .finish => {
+                try self.emitIndent(indent_level, writer);
+                try writer.writeAll("$finish;\n");
+            },
+        }
+    }
+
     pub fn emitTestbench(self: *SystemVerilogEmitter, tb: *const hir.HirTestbench, writer: anytype) !void {
         var safe_name_buf: [256]u8 = undefined;
         var safe_len: usize = 0;
@@ -679,128 +889,7 @@ pub const SystemVerilogEmitter = struct {
         try writer.writeAll("    initial begin\n");
 
         for (tb.sim_stmts) |stmt| {
-            switch (stmt.tag) {
-                .trace => {
-                    const t = stmt.data.trace;
-                    try writer.print("        $dumpfile(\"{s}\");\n", .{t.vcd_path});
-                    try writer.print("        $dumpvars(0, {s});\n", .{tb_mod_name});
-                },
-                .rst_pulse => {
-                    const rp = stmt.data.rst_pulse;
-                    const clk_to_use = rp.clk_name orelse default_clk;
-                    if (rp.duration_raw) |dur| {
-                        if (rp.active_low) {
-                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
-                            try writer.print("        #{s};\n", .{dur});
-                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
-                        } else {
-                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
-                            try writer.print("        #{s};\n", .{dur});
-                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
-                        }
-                    } else {
-                        const cycles = rp.cycles orelse 1;
-                        if (rp.active_low) {
-                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
-                            try writer.print("        repeat ({d}) @(posedge {s});\n", .{ cycles, clk_to_use });
-                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
-                            try writer.print("        @(posedge {s});\n", .{clk_to_use});
-                        } else {
-                            try writer.print("        {s} = 1'b1;\n", .{rp.rst_name});
-                            try writer.print("        repeat ({d}) @(posedge {s});\n", .{ cycles, clk_to_use });
-                            try writer.print("        {s} = 1'b0;\n", .{rp.rst_name});
-                            try writer.print("        @(posedge {s});\n", .{clk_to_use});
-                        }
-                    }
-                },
-                .step => {
-                    const s = stmt.data.step;
-                    const clk_to_use = s.clk_name orelse default_clk;
-                    const edge_str = if (s.edge == .negedge) "negedge" else "posedge";
-                    if (s.cycles == 1) {
-                        try writer.print("        @({s} {s});\n", .{ edge_str, clk_to_use });
-                    } else {
-                        try writer.print("        repeat ({d}) @({s} {s});\n", .{ s.cycles, edge_str, clk_to_use });
-                    }
-                },
-                .delay => {
-                    const d = stmt.data.delay;
-                    if (d.raw.len > 0) {
-                        try writer.print("        #{s};\n", .{d.raw});
-                    } else {
-                        try writer.print("        #{d}ns;\n", .{d.ns});
-                    }
-                },
-                .assign => {
-                    const a = stmt.data.assign;
-                    try writer.writeAll("        ");
-                    try self.emitExpr(a.target, writer);
-                    try writer.writeAll(" = ");
-                    try self.emitExpr(a.value, writer);
-                    try writer.writeAll(";\n");
-                },
-                .assert_stmt => {
-                    const as = stmt.data.assert_stmt;
-                    try writer.writeAll("        if (!(");
-                    try self.emitExpr(as.cond, writer);
-                    try writer.writeAll(")) begin\n");
-                    if (as.msg) |msg| {
-                        try writer.writeAll("            $error(\"[FAIL] ");
-                        for (msg) |c| {
-                            if (c == '%') {
-                                try writer.writeAll("%%");
-                            } else if (c == '"') {
-                                try writer.writeAll("\\\"");
-                            } else if (c == '\\') {
-                                try writer.writeAll("\\\\");
-                            } else {
-                                try writer.writeByte(c);
-                            }
-                        }
-                        try writer.writeAll("\");\n");
-                    } else {
-                        try writer.print("            $error(\"[FAIL] Assertion failed in test '{s}'\");\n", .{tb.name});
-                    }
-                    try writer.writeAll("            $fatal(1);\n");
-                    try writer.writeAll("        end\n");
-                },
-                .print => {
-                    const p = stmt.data.print;
-                    try writer.print("        $display(\"{s}\");\n", .{p.fmt});
-                },
-                .wait_for => {
-                    const wf = stmt.data.wait_for;
-                    const clk_to_use = wf.clk_name orelse default_clk;
-                    if (wf.timeout_raw) |t_raw| {
-                        try writer.writeAll("        fork\n");
-                        try writer.writeAll("            begin\n");
-                        try writer.writeAll("                wait (");
-                        try self.emitExpr(wf.cond, writer);
-                        try writer.writeAll(");\n");
-                        try writer.writeAll("            end\n");
-                        try writer.print("            begin\n                #{s};\n                $error(\"[TIMEOUT] wait_for timed out after {s}\");\n                $fatal(1);\n            end\n", .{ t_raw, t_raw });
-                        try writer.writeAll("        join_any\n");
-                        try writer.writeAll("        disable fork;\n");
-                    } else if (wf.max_cycles) |max_c| {
-                        try writer.writeAll("        fork\n");
-                        try writer.writeAll("            begin\n");
-                        try writer.writeAll("                wait (");
-                        try self.emitExpr(wf.cond, writer);
-                        try writer.writeAll(");\n");
-                        try writer.writeAll("            end\n");
-                        try writer.print("            begin\n                repeat ({d}) @(posedge {s});\n                $error(\"[TIMEOUT] wait_for timed out\");\n                $fatal(1);\n            end\n", .{ max_c, clk_to_use });
-                        try writer.writeAll("        join_any\n");
-                        try writer.writeAll("        disable fork;\n");
-                    } else {
-                        try writer.writeAll("        wait (");
-                        try self.emitExpr(wf.cond, writer);
-                        try writer.writeAll(");\n");
-                    }
-                },
-                .finish => {
-                    try writer.writeAll("        $finish;\n");
-                },
-            }
+            try self.emitSimStmt(stmt, writer, tb.*, tb_mod_name, default_clk, 2);
         }
 
         try writer.print("        $display(\"[PASS] Test '{s}' PASSED\");\n", .{tb.name});

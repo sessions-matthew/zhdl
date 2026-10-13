@@ -32,6 +32,7 @@ pub const TokenType = enum {
     kw_test,
     kw_sim,
     kw_async,
+    kw_spawn,
 
     // Zig Standard Keywords
     kw_const,
@@ -164,6 +165,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "or", .kw_or },
     .{ "extern", .kw_extern },
     .{ "async", .kw_async },
+    .{ "spawn", .kw_spawn },
 });
 
 pub const builtins = std.StaticStringMap(TokenType).initComptime(.{

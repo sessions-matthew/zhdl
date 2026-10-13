@@ -1124,16 +1124,53 @@ ZHdl clearly separates **synchronous (clock-bound)** stimulus from **asynchronou
 | `var rst = reset(.async)` / `reset(.sync)` | Reset | Declaratively defines an active-high reset initialized to inactive | `logic rst = 0;` |
 | `var rst_n = reset(.async, .active_low)` | Reset | Declaratively defines an active-low reset initialized to inactive | `logic rst_n = 1;` |
 | `clk.pulse_reset(rst, cycles)` | Synchronous | Asserts reset synchronously across $N$ cycles of `clk`, then deasserts | `repeat (cycles) @(posedge clk);` |
+| `clk.drive(sig, val)` | Synchronous | Drives signal synchronously aligned to clock domain using non-blocking assignment (`sig <= val;`) | `sig <= val;` |
+| `clk.sample(sig)` | Synchronous | Evaluates and samples signal aligned to clock domain | `sig` |
 | `clk.step(cycles)` | Synchronous | Synchronously advances simulation by $N$ rising edges of `clk` | `repeat (cycles) @(posedge clk);` |
 | `clk.posedge()` / `clk.negedge()` | Synchronous | Waits for the next rising or falling edge of `clk` | `@(posedge clk);` / `@(negedge clk);` |
 | `clk.wait_until(cond, timeout)` | Synchronous | Synchronously waits until `cond` is true on `clk` rising edges up to `timeout` cycles | Bounded cycle-accurate wait loop |
 | `rst.pulse(20ns)` | Asynchronous | Asynchronously asserts reset for a physical duration, then deasserts | `rst = 1; #20ns; rst = 0;` |
 | `delay(50ns)` / `delay(10us)` | Asynchronous | Explicit physical delay with typed time units (`ps`, `ns`, `us`, `ms`, `s`) | `#50ns;` / `#10us;` |
+| `spawn { ... }` | Concurrency | Spawns a concurrent background process (monitor or responder thread) | `fork begin ... end join_none` |
 | `wait_for(cond, timeout)` | Verification | Waits until `cond` is asserted or fails after `timeout` (time or cycles) | `fork ... wait (cond); ... #timeout; ... join_any` |
 | `assert_within(cond, timeout)` | Verification | Asserts `cond` occurs within physical timeout or cycle limit | Bounded assertion verification |
 | `assert(cond, "msg")` | Verification | Hardware assertion check; aborts simulation with error code on failure | `if (!(cond)) begin $error("[FAIL] msg"); $fatal(1); end` |
 | `trace("path.vcd")` | Simulation | Enables VCD waveform dump for GTKWave or VS Code Surfer | `$dumpfile("path.vcd"); $dumpvars(0, tb_mod);` |
 | `finish()` | Simulation | Terminates simulation successfully | `$finish;` |
+
+### 11.4 Synchronous Signal Driving, Sampling, and Structured Concurrency
+
+To eliminate zero-time delta-cycle races between testbench stimulus and DUT registers while adhering to Zig idioms and the principle of "only one obvious way", ZHdl provides dedicated clock-domain simulation primitives:
+
+#### Synchronous Driving (`clk.drive(sig, val)`)
+Instead of introducing operator overloading (`<=`) or ambiguous blocking assignments into testbenches, synchronous signals are driven through the clock method `clk.drive(sig, val)`. This lowers directly to SystemVerilog non-blocking procedural assignments (`sig <= val;`) in `initial` blocks:
+```zig
+clk.drive(cmd, Command{ .ping = 0xA5 });
+clk.step(1);
+```
+
+#### Synchronous Sampling (`clk.sample(sig)`)
+Signal expressions sampled in clock-synchronous assertions and procedural stimulus can be wrapped in `clk.sample(sig)` to explicitly document and evaluate the value in the active clock domain:
+```zig
+assert(clk.sample(rx_stream.valid) == 1, "Should be valid");
+assert(clk.sample(rx_stream.data) == 0xA5, "Should echo ping");
+```
+
+#### Structured Simulation Concurrency (`spawn { ... }`)
+Complex testbenches frequently require background responder or monitor processes running alongside the main stimulus sequence. The `spawn { ... }` block lowers to SystemVerilog `fork begin ... end join_none`:
+```zig
+// Concurrent monitor thread running in the background
+spawn {
+    wait_for(rx_stream.valid == 1, 10);
+    assert(clk.sample(rx_stream.data) == 0xA5, "Should echo ping data synchronously");
+}
+
+// Main stimulus thread continues immediately
+clk.drive(cmd, Command{ .ping = 0xA5 });
+clk.step(1);
+```
+> [!IMPORTANT]
+> `spawn { ... }` is strictly a verification and simulation primitive. Using `spawn` inside synthesizable hardware modules is illegal and rejected at elaboration with `error.SpawnInModule`.
 
 #### Typed Time Literals
 Time quantities in testbenches support standard physical units:

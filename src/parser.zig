@@ -1070,6 +1070,25 @@ pub const Parser = struct {
             };
         }
 
+        if (self.match(.kw_spawn)) {
+            _ = try self.expect(.l_brace);
+            var body_stmts = ArrayList(ast.Statement).init(alloc);
+            while (!self.check(.r_brace) and !self.check(.eof)) {
+                try body_stmts.append(try self.parseStatement(alloc));
+            }
+            _ = try self.expect(.r_brace);
+
+            return .{
+                .tag = .spawn_stmt,
+                .loc = stmt_loc,
+                .data = .{
+                    .spawn_stmt = .{
+                        .body = try body_stmts.toOwnedSlice(),
+                    },
+                },
+            };
+        }
+
         // Assignment: target = value; OR target := value; OR Expr statement: call(...);
         const target = try self.parseExpr(alloc);
         const is_equal = self.match(.equal);

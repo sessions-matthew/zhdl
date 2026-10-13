@@ -84,18 +84,26 @@ test "PacketFilter processes commands" {
 
     trace("filter_tb.vcd");
     clk.pulse_reset(rst_n, 2); // Synchronous 2-cycle reset pulse on clock
+    clk.drive(cmd, Command{ .idle = 0 });
 
     // Allow 2-stage synchronizer pipeline to settle
     clk.step(2);
 
-    cmd = Command{ .ping = 0xA5 };
-    clk.step(1);          // Synchronous clock step method
-    assert(rx_stream.valid == 1, "Should be valid");
-    assert(rx_stream.data == 0xA5, "Should echo ping");
+    // Concurrent responder/monitor process
+    spawn {
+        wait_for(rx_stream.valid == 1, 10);
+        assert(clk.sample(rx_stream.data) == 0xA5, "Should echo ping data synchronously");
+    }
 
-    cmd = Command{ .idle = 0 };
+    // Drive command synchronously aligned to clock domain (NBA non-blocking semantics)
+    clk.drive(cmd, Command{ .ping = 0xA5 });
+    clk.step(1);          // Synchronous clock step method
+    assert(clk.sample(rx_stream.valid) == 1, "Should be valid");
+    assert(clk.sample(rx_stream.data) == 0xA5, "Should echo ping");
+
+    clk.drive(cmd, Command{ .idle = 0 });
     clk.step(1);
-    assert(rx_stream.valid == 0, "Should be idle/null");
+    assert(clk.sample(rx_stream.valid) == 0, "Should be idle/null");
     finish();
 }
 ```
@@ -300,6 +308,9 @@ wire busy = state.isBusy();
 
 ZHdl provides first-class verification primitives matching modern cycle-accurate and time-based testing workflows:
 - **Frequency Literals (`100MHz`, `50MHz`, `1GHz`, `32kHz`)**: Sub-nanosecond precision clock generators (`var clk = clock(100MHz);`).
+- **Clock-Synchronous Driving (`clk.drive(sig, val)`)**: Eliminates zero-time hold-time delta-cycle races by lowering to SystemVerilog non-blocking procedural assignments (`sig <= val;`) without operator overloading.
+- **Clock-Synchronous Sampling (`clk.sample(sig)`)**: Cleanly evaluates and samples DUT signals aligned to the active clock domain inside assertions and expressions.
+- **Structured Simulation Concurrency (`spawn { ... }`)**: Spawns concurrent background monitor/responder processes lowered to `fork begin ... end join_none` (strictly forbidden in synthesizable modules).
 - **Signal-Centric Stepping**: Synchronous edge advancement (`clk.step(5)`, `clk.posedge()`, `clk.negedge()`, `clk.wait_until(cond, N)`).
 - **Explicit Reset Pulses**: Synchronous clock-bound pulses (`clk.pulse_reset(rst, 2)`) and physical duration pulses (`rst.pulse(20ns)`).
 - **Timeout Assertions**: Bounded event detection (`wait_for(cond, 100ns)`, `wait_for(cond, 50)`).

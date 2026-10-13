@@ -252,6 +252,8 @@ pub const HirSimStmtTag = enum {
     print,
     wait_for,
     finish,
+    clk_drive,
+    spawn,
 };
 
 pub const HirSimStmt = struct {
@@ -295,6 +297,14 @@ pub const HirSimStmt = struct {
             clk_name: ?[]const u8 = null,
         },
         finish: void,
+        clk_drive: struct {
+            clk_name: []const u8,
+            target: *HirExpr,
+            value: *HirExpr,
+        },
+        spawn: struct {
+            stmts: []HirSimStmt,
+        },
     },
 };
 

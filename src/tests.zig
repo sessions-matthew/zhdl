@@ -4392,28 +4392,174 @@ test "asynchronous input port: rejection of direct sampling and acceptance of @s
     try runVerilatorLint(std.testing.allocator, sv_code);
 }
 
+test "simulation clk.drive and clk.sample syntax and codegen" {
+    const src =
+        \\pub const Dummy = module {
+        \\    in clk: clock,
+        \\    in rst: reset(.async),
+        \\    in din: u8,
+        \\    out dout: u8,
+        \\    reg r: u8 = 0;
+        \\    comb {
+        \\        r := din;
+        \\        dout = r;
+        \\    }
+        \\};
+        \\
+        \\test "DriveSampleTb" {
+        \\    var clk = clock(10ns);
+        \\    var rst = reset(.async);
+        \\    wire din: u8 = 0;
+        \\    wire dout: u8 = 0;
+        \\
+        \\    const dut = Dummy.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .din = din,
+        \\        .dout = dout,
+        \\    });
+        \\
+        \\    clk.pulse_reset(rst, 2);
+        \\    clk.drive(din, 0x42);
+        \\    clk.step(2);
+        \\    assert(clk.sample(dout) == 0x42, "dout mismatch after synchronous clk.drive");
+        \\    clk.drive(din, 0x55);
+        \\    clk.posedge();
+        \\    clk.posedge();
+        \\    assert(clk.sample(dout) == 0x55, "dout mismatch after second drive");
+        \\}
+    ;
 
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
 
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
 
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesignEx(&hir_design, true, &sw);
 
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "din <= ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "dout ==") != null);
 
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
 
+test "simulation spawn concurrency block and verification" {
+    const src =
+        \\pub const Echo = module {
+        \\    in clk: clock,
+        \\    in rst: reset(.async),
+        \\    in rx_valid: u1,
+        \\    in rx_data: u8,
+        \\    out tx_valid: u1,
+        \\    out tx_data: u8,
+        \\    reg v: u1 = 0;
+        \\    reg d: u8 = 0;
+        \\    comb {
+        \\        v := rx_valid;
+        \\        d := rx_data;
+        \\        tx_valid = v;
+        \\        tx_data = d;
+        \\    }
+        \\};
+        \\
+        \\test "SpawnTb" {
+        \\    var clk = clock(10ns);
+        \\    var rst = reset(.async);
+        \\    wire rx_valid: u1 = 0;
+        \\    wire rx_data: u8 = 0;
+        \\    wire tx_valid: u1 = 0;
+        \\    wire tx_data: u8 = 0;
+        \\
+        \\    const dut = Echo.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst = rst,
+        \\        .rx_valid = rx_valid,
+        \\        .rx_data = rx_data,
+        \\        .tx_valid = tx_valid,
+        \\        .tx_data = tx_data,
+        \\    });
+        \\
+        \\    clk.pulse_reset(rst, 2);
+        \\
+        \\    // Spawn background monitor
+        \\    spawn {
+        \\        wait_for(tx_valid == 1, 20);
+        \\        assert(clk.sample(tx_data) == 0xA5, "Monitor caught unexpected tx_data");
+        \\    }
+        \\
+        \\    // Main test stimulus
+        \\    clk.drive(rx_valid, 1);
+        \\    clk.drive(rx_data, 0xA5);
+        \\    clk.step(1);
+        \\    clk.drive(rx_valid, 0);
+        \\    clk.step(3);
+        \\}
+    ;
 
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
 
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
 
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesignEx(&hir_design, true, &sw);
 
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "fork") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "join_none") != null);
 
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
 
+test "reject spawn inside synthesizable hardware module" {
+    const src_top =
+        \\pub const BadModTop = module {
+        \\    in clk: clock,
+        \\    spawn {
+        \\        clk.step(1);
+        \\    }
+        \\};
+    ;
+    var p1 = @import("parser.zig").Parser.init(std.testing.allocator, src_top);
+    var a1 = try p1.parse();
+    defer a1.deinit();
+    var e1 = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &a1);
+    defer e1.deinit();
+    try std.testing.expectError(error.SpawnInModule, e1.elaborate(null));
 
-
-
-
-
-
-
-
-
-
-
-
+    const src_comb =
+        \\pub const BadModComb = module {
+        \\    in clk: clock,
+        \\    comb {
+        \\        spawn {
+        \\            clk.step(1);
+        \\        }
+        \\    }
+        \\};
+    ;
+    var p2 = @import("parser.zig").Parser.init(std.testing.allocator, src_comb);
+    var a2 = try p2.parse();
+    defer a2.deinit();
+    var e2 = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &a2);
+    defer e2.deinit();
+    try std.testing.expectError(error.SpawnInModule, e2.elaborate(null));
+}
 

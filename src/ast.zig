@@ -228,6 +228,7 @@ pub const StatementTag = enum {
     switch_stmt,
     inline_for,
     expr_stmt,
+    spawn_stmt,
 };
 
 pub const Statement = struct {
@@ -261,6 +262,9 @@ pub const Statement = struct {
             body: []Statement,
         },
         expr_stmt: *Expr,
+        spawn_stmt: struct {
+            body: []Statement,
+        },
     },
 };
 
