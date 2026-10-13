@@ -9,7 +9,7 @@ test "lexer basic tokens" {
         \\const uart = @import("uart.zhdl");
         \\pub const Counter = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out count: u8,
         \\    var count_reg = reg(u8, .{ .clk = clk, .rst = rst, .init = 0 });
@@ -61,7 +61,7 @@ test "parser module and downward slicing sugar" {
     const src =
         \\pub const Counter = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in din: u8,
         \\    out dout: u4,
         \\    out rev: u4,
@@ -90,7 +90,7 @@ test "end-to-end elaboration and SystemVerilog emission" {
     const src =
         \\pub const Counter = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out count: u8,
         \\    out rev: u4,
@@ -139,7 +139,7 @@ test "option 1 reg syntax with implicit clock/reset binding" {
     const src =
         \\pub const StreamReg = module {
         \\    in clk: clock,
-        \\    in rst_n: reset(.low),
+        \\    in rst_n: reset(.async, .active_low),
         \\    in d_in: u8,
         \\    out d_out: u8,
         \\
@@ -403,7 +403,7 @@ test "race condition: clocked registers safely break combinational loops" {
     const src =
         \\pub const SafeCounter = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    out count: u8,
         \\    reg count_reg: u8 = 0;
         \\    comb {
@@ -572,7 +572,7 @@ test "register assignment: := operator updates register" {
     const src =
         \\pub const RegAssign = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out count: u8,
         \\    var count_reg = reg(u8, .{ .clk = clk, .rst = rst, .init = 0 });
@@ -610,7 +610,7 @@ test "register assignment: := operator updates register array element" {
     const src =
         \\pub const ArrayAssign = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in wr_en: u1,
         \\    in wr_ptr: u4,
         \\    in din: u8,
@@ -678,7 +678,7 @@ test "packed struct: field offsets, reading member fields, and bit slicing" {
         \\
         \\pub const StructReader = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in raw_packet: Header,
         \\    out cmd_out: u8,
         \\    out addr_out: u16,
@@ -747,7 +747,7 @@ test "packed struct: field assignment and struct literal initialization" {
         \\
         \\pub const StructWriter = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out pkt_out: Header,
         \\    reg pkt_reg: Header = 0;
@@ -876,7 +876,7 @@ test "hardware optional: declaration, valid/data fields, auto-wrapping, and rese
     const src =
         \\pub const OptionalDevice = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in push: u1,
         \\    in clear: u1,
         \\    in in_byte: u8,
@@ -947,7 +947,7 @@ test "hardware optional: payload unwrapping with if (opt) |byte|" {
     const src =
         \\pub const OptionalUnwrapper = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in load: u1,
         \\    in reset_opt: u1,
         \\    in payload_in: u8,
@@ -999,7 +999,7 @@ test "hardware optional: direct field assignment and if without capture" {
     const src =
         \\pub const OptionalDirectFields = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    in data_val: u16,
         \\    out is_valid_out: u1,
@@ -1058,7 +1058,7 @@ test "hardware tagged union: definition, variant initialization, tag & payload a
         \\
         \\pub const TaggedUnionBasic = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in set_ping: u1,
         \\    in in_ping: u8,
         \\    out current_tag: u2,
@@ -1127,7 +1127,7 @@ test "hardware tagged union: pattern matching switch with payload capture" {
         \\
         \\pub const TaggedUnionSwitch = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in load_ping: u1,
         \\    in in_ping: u8,
         \\    out out_val: u8,
@@ -1195,7 +1195,7 @@ test "hardware tagged union: explicit tag type and anonymous variant struct init
         \\
         \\pub const TaggedUnionExplicitTag = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in load_hdr: u1,
         \\    in hdr_val: u16,
         \\    out tag_out: u4,
@@ -1401,7 +1401,7 @@ test "type methods: method calling another method and register state" {
         \\
         \\pub const RegMethodModule = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in in_num: Number,
         \\    out out_nz: u1,
         \\
@@ -1441,7 +1441,7 @@ test "generic module instantiation and monomorphization with Counter(8) and Coun
         \\pub fn Counter(comptime W: u32) type {
         \\    return module {
         \\        in clk: clock,
-        \\        in rst: reset,
+        \\        in rst: reset(.async),
         \\        in en: u1,
         \\        out count: u(W),
         \\        reg count_reg: u(W) = 0;
@@ -1456,7 +1456,7 @@ test "generic module instantiation and monomorphization with Counter(8) and Coun
         \\
         \\pub const Top = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out count8: u8,
         \\    out count16: u16,
@@ -1543,7 +1543,7 @@ test "generic module alias instantiation with top-level and module-level const" 
         \\pub fn Counter(comptime W: u32) type {
         \\    return module {
         \\        in clk: clock,
-        \\        in rst: reset,
+        \\        in rst: reset(.async),
         \\        in en: u1,
         \\        out count: u(W),
         \\        reg count_reg: u(W) = 0;
@@ -1561,7 +1561,7 @@ test "generic module alias instantiation with top-level and module-level const" 
         \\
         \\pub const Top = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out count8: u8,
         \\    out count16: u16,
@@ -1618,7 +1618,7 @@ test "generic module with type parameter" {
         \\pub fn Pipe(comptime T: type) type {
         \\    return module {
         \\        in clk: clock,
-        \\        in rst: reset,
+        \\        in rst: reset(.async),
         \\        in d_in: T,
         \\        out d_out: T,
         \\        reg stage: T = 0;
@@ -1631,7 +1631,7 @@ test "generic module with type parameter" {
         \\
         \\pub const Top = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in byte_in: u8,
         \\    out byte_out: u8,
         \\    in word_in: u16,
@@ -1686,7 +1686,7 @@ test "generic module instantiated in hardware testbench" {
         \\pub fn Counter(comptime W: u32) type {
         \\    return module {
         \\        in clk: clock,
-        \\        in rst: reset,
+        \\        in rst: reset(.async),
         \\        in en: u1,
         \\        out count: u(W),
         \\        reg count_reg: u(W) = 0;
@@ -1701,7 +1701,7 @@ test "generic module instantiated in hardware testbench" {
         \\
         \\test "Counter8 TB" {
         \\    var clk = clock(10ns);
-        \\    var rst = reset();
+        \\    var rst = reset(.async);
         \\    wire en: u1;
         \\    wire count: u8;
         \\
@@ -1841,7 +1841,7 @@ test "time-based testing: clock(10ns) and clk.wait_until with time literal timeo
     const src =
         \\pub const StepDevice = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    out ready: u1,
         \\    var count = reg(u4, .{ .clk = clk, .rst = rst, .init = 0 });
         \\    comb {
@@ -1852,7 +1852,7 @@ test "time-based testing: clock(10ns) and clk.wait_until with time literal timeo
         \\
         \\test "WaitTime TB" {
         \\    var clk = clock(10ns);
-        \\    var rst = reset();
+        \\    var rst = reset(.async);
         \\    wire ready: u1;
         \\
         \\    const dut = StepDevice.instantiate(.{
@@ -1914,9 +1914,9 @@ test "typed reset polarity: explicit polarity without variable name deduction" {
         \\pub const TypedResetModule = module {
         \\    in clk: clock,
         \\    // Variable named rst_n but typed active-high: MUST emit posedge rst_n and if (rst_n)!
-        \\    in rst_n: reset(.high),
+        \\    in rst_n: reset(.async, .active_high),
         \\    // Variable without _n but typed active-low: MUST emit negedge rst_custom and if (!rst_custom)!
-        \\    in rst_custom: reset(.low),
+        \\    in rst_custom: reset(.async, .active_low),
         \\    in d: u8,
         \\    out q1: u8,
         \\    out q2: u8,
@@ -1934,8 +1934,8 @@ test "typed reset polarity: explicit polarity without variable name deduction" {
         \\
         \\test "TypedResetTb" {
         \\    var clk = clock(10ns);
-        \\    var rst_n = reset(.active_high);
-        \\    var rst_custom = reset(.active_low);
+        \\    var rst_n = reset(.async, .active_high);
+        \\    var rst_custom = reset(.async, .active_low);
         \\    wire d: u8;
         \\    wire q1: u8;
         \\    wire q2: u8;
@@ -1998,7 +1998,7 @@ test "dynamic enum variant resolution without hardcoded name deduction" {
     const src =
         \\pub const CustomEnumMod = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    const State = enum(u3) {
         \\        idle = 0,
         \\        running = 1,
@@ -2018,7 +2018,7 @@ test "dynamic enum variant resolution without hardcoded name deduction" {
         \\
         \\test "CustomEnumTb" {
         \\    var clk = clock(10ns);
-        \\    var rst = reset();
+        \\    var rst = reset(.async);
         \\    const State = enum(u3) {
         \\        idle = 0,
         \\        running = 1,
@@ -2168,7 +2168,7 @@ test "sim timing: clk.step, clk.posedge, clk.negedge, rst.pulse(duration), and r
     const src =
         \\pub const StepCounter = module {
         \\    in clk: clock,
-        \\    in rst_n: reset(.low),
+        \\    in rst_n: reset(.async, .active_low),
         \\    in en: u1,
         \\    out count: u8,
         \\    reg count_reg: u8 = 0;
@@ -2182,7 +2182,7 @@ test "sim timing: clk.step, clk.posedge, clk.negedge, rst.pulse(duration), and r
         \\
         \\test "TimingMethodsTb" {
         \\    var clk = clock(100MHz);
-        \\    var rst_n = reset(.active_low);
+        \\    var rst_n = reset(.async, .active_low);
         \\    wire en: u1 = 0;
         \\    wire count: u8;
         \\
@@ -2533,7 +2533,7 @@ test "module hygiene: comb block with register updates and wire driving" {
     const src =
         \\pub const FlatCounter = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    out count: u8,
         \\
         \\    reg(clk, rst) r_count: u8 = 0;
@@ -2546,7 +2546,7 @@ test "module hygiene: comb block with register updates and wire driving" {
         \\
         \\test "FlatCounter TB" {
         \\    var clk = clock(100MHz);
-        \\    var rst = reset();
+        \\    var rst = reset(.async);
         \\    wire count: u8;
         \\
         \\    const dut = FlatCounter.instantiate(.{
@@ -2720,7 +2720,7 @@ test "parameterized module declaration with pub const Name = module(comptime W: 
     const src =
         \\pub const Counter = module(comptime W: u32) {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out count: u(W),
         \\    reg count_reg: u(W) = 0;
@@ -2734,7 +2734,7 @@ test "parameterized module declaration with pub const Name = module(comptime W: 
         \\
         \\pub const Top = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in en: u1,
         \\    out count8: u8,
         \\    out count16: u16,
@@ -2966,7 +2966,7 @@ test "optional sim block: flat testbench with var decl and inline for" {
     const src =
         \\pub module Accumulator {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in inc: u8,
         \\    out total: u8,
         \\    reg acc: u8 = 0;
@@ -2978,7 +2978,7 @@ test "optional sim block: flat testbench with var decl and inline for" {
         \\
         \\test "Accumulator TB Flat" {
         \\    var clk = clock(10ns);
-        \\    var rst = reset();
+        \\    var rst = reset(.async);
         \\    wire inc: u8;
         \\    wire total: u8;
         \\
@@ -3406,7 +3406,7 @@ test "multi-file @import: testbench instantiating imported DUT and sim run" {
     const counter_pkg =
         \\pub const UpCounter = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    out val: u8,
         \\
         \\    reg count: u8 = 0;
@@ -3423,7 +3423,7 @@ test "multi-file @import: testbench instantiating imported DUT and sim run" {
         \\
         \\test "Imported Counter TB" {
         \\    var clk = clock(100MHz);
-        \\    var rst = reset();
+        \\    var rst = reset(.async);
         \\    wire val: u8;
         \\
         \\    const dut = cnt_pkg.UpCounter.instantiate(.{
@@ -3788,7 +3788,7 @@ test "inline for with dynamic part select and array register" {
         \\
         \\pub const ShaBlock = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in load: u1,
         \\    in block: u512,
         \\    out w0: u32,
@@ -3868,7 +3868,7 @@ test "LHS concatenation and tuple assignment in comb and sync" {
     const src =
         \\pub module ConcatAssign {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in a: u8,
         \\    in b: u8,
         \\    out cy: u1,
@@ -4029,7 +4029,7 @@ test "standardization: reject deprecated sync block" {
     const src =
         \\pub const BadSyncMod = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    reg count: u8 = 0;
         \\    sync(clk, rst) {
         \\        count := count +% 1;
@@ -4045,7 +4045,7 @@ test "standardization: tuple assignment with := operator and aggregate packing" 
     const src =
         \\pub const TupleAssignMod = module {
         \\    in clk: clock,
-        \\    in rst: reset,
+        \\    in rst: reset(.async),
         \\    in in_data: u8,
         \\    out out_hi: u4,
         \\    out out_lo: u4,
@@ -4155,9 +4155,9 @@ test "simulation standard: explicit clock domain in rst.pulse(cycles, clk) and c
     const src =
         \\pub const MultiClockDevice = module {
         \\    in clk_fast: clock,
-        \\    in rst_fast: reset,
+        \\    in rst_fast: reset(.async),
         \\    in clk_slow: clock,
-        \\    in rst_slow: reset,
+        \\    in rst_slow: reset(.async),
         \\    out ready: u1,
         \\    reg r_fast: u8 = 0;
         \\    reg r_slow: u8 = 0;
@@ -4170,9 +4170,9 @@ test "simulation standard: explicit clock domain in rst.pulse(cycles, clk) and c
         \\
         \\test "MultiClockExplicitTB" {
         \\    var clk_fast = clock(100MHz);
-        \\    var rst_fast = reset();
+        \\    var rst_fast = reset(.async);
         \\    var clk_slow = clock(10MHz);
-        \\    var rst_slow = reset();
+        \\    var rst_slow = reset(.async);
         \\    wire ready: u1;
         \\
         \\    const dut = MultiClockDevice.instantiate(.{
@@ -4216,6 +4216,182 @@ test "simulation standard: explicit clock domain in rst.pulse(cycles, clk) and c
     try runVerilatorLint(std.testing.allocator, sv_code);
     try runVerilatorSim(std.testing.allocator, sv_code);
 }
+
+test "explicit reset modes: synchronous vs asynchronous emission" {
+    const src =
+        \\pub const ResetDemo = module {
+        \\    in clk: clock,
+        \\    in rst_s: reset(.sync),
+        \\    in rst_a: reset(.async),
+        \\    in rst_an: reset(.async, .active_low),
+        \\    out q_s: u8,
+        \\    out q_a: u8,
+        \\    out q_an: u8,
+        \\
+        \\    reg(clk, rst_s) r_sync: u8 = 0;
+        \\    reg(clk, rst_a) r_async: u8 = 0;
+        \\    reg(clk, rst_an) r_async_n: u8 = 0;
+        \\
+        \\    comb {
+        \\        r_sync := r_sync +% 1;
+        \\        r_async := r_async +% 1;
+        \\        r_async_n := r_async_n +% 1;
+        \\        q_s = r_sync;
+        \\        q_a = r_async;
+        \\        q_an = r_async_n;
+        \\    }
+        \\};
+        \\
+        \\test "ResetDemoTb" {
+        \\    var clk = clock(10ns);
+        \\    var rst_s = reset(.sync);
+        \\    var rst_a = reset(.async);
+        \\    var rst_an = reset(.async, .active_low);
+        \\    wire q_s: u8;
+        \\    wire q_a: u8;
+        \\    wire q_an: u8;
+        \\
+        \\    const dut = ResetDemo.instantiate(.{
+        \\        .clk = clk,
+        \\        .rst_s = rst_s,
+        \\        .rst_a = rst_a,
+        \\        .rst_an = rst_an,
+        \\        .q_s = q_s,
+        \\        .q_a = q_a,
+        \\        .q_an = q_an,
+        \\    });
+        \\
+        \\    sim {
+        \\        clk.pulse_reset(rst_s, 2);
+        \\        rst_a.pulse(20ns);
+        \\        rst_an.pulse(20ns);
+        \\        clk.step(5);
+        \\        finish();
+        \\    }
+        \\}
+    ;
+
+    var parser = @import("parser.zig").Parser.init(std.testing.allocator, src);
+    var ast_tree = try parser.parse();
+    defer ast_tree.deinit();
+
+    var elaborator = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_tree);
+    defer elaborator.deinit();
+
+    var hir_design = try elaborator.elaborate(null);
+    defer hir_design.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_design, &sw);
+
+    const sv_code = sv_buffer.items;
+    // Synchronous reset must NOT have reset signal in sensitivity list:
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always_ff @(posedge clk) begin\n        if (rst_s) begin") != null);
+    // Asynchronous active-high reset must include edge:
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always_ff @(posedge clk or posedge rst_a) begin\n        if (rst_a) begin") != null);
+    // Asynchronous active-low reset must include negedge:
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "always_ff @(posedge clk or negedge rst_an) begin\n        if (!rst_an) begin") != null);
+    // clk.pulse_reset emits repeat:
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "repeat (2) @(posedge clk);") != null);
+
+    try runVerilatorLint(std.testing.allocator, sv_code);
+    try runVerilatorSim(std.testing.allocator, sv_code);
+}
+
+test "explicit reset modes: reject underspecified reset in module and testbench" {
+    const bad_mod_bare =
+        \\pub const BadMod = module {
+        \\    in clk: clock,
+        \\    in rst: reset,
+        \\};
+    ;
+    var p1 = @import("parser.zig").Parser.init(std.testing.allocator, bad_mod_bare);
+    try std.testing.expectError(error.UnderspecifiedReset, p1.parse());
+
+    const bad_mod_pol_only =
+        \\pub const BadModPol = module {
+        \\    in clk: clock,
+        \\    in rst: reset(.active_low),
+        \\};
+    ;
+    var p2 = @import("parser.zig").Parser.init(std.testing.allocator, bad_mod_pol_only);
+    try std.testing.expectError(error.UnderspecifiedReset, p2.parse());
+
+    const bad_tb_bare =
+        \\pub const Dummy = module {
+        \\    in clk: clock,
+        \\};
+        \\test "BadTb" {
+        \\    var clk = clock(10ns);
+        \\    var rst = reset();
+        \\    const dut = Dummy.instantiate(.{ .clk = clk });
+        \\}
+    ;
+    var p3 = @import("parser.zig").Parser.init(std.testing.allocator, bad_tb_bare);
+    var ast3 = try p3.parse();
+    defer ast3.deinit();
+    var elab3 = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast3);
+    defer elab3.deinit();
+    try std.testing.expectError(error.UnderspecifiedReset, elab3.elaborate(null));
+}
+
+test "asynchronous input port: rejection of direct sampling and acceptance of @sync2ff" {
+    const bad_async_src =
+        \\pub const BadAsync = module {
+        \\    in clk: clock,
+        \\    in rst: reset(.async),
+        \\    in async rx: u1,
+        \\    out q: u1,
+        \\    reg r: u1 = 0;
+        \\    comb {
+        \\        r := rx;
+        \\        q = r;
+        \\    }
+        \\};
+    ;
+    var p_bad = @import("parser.zig").Parser.init(std.testing.allocator, bad_async_src);
+    var ast_bad = try p_bad.parse();
+    defer ast_bad.deinit();
+    var elab_bad = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_bad);
+    defer elab_bad.deinit();
+    try std.testing.expectError(error.DirectAsyncInputSampling, elab_bad.elaborate(null));
+
+    const safe_async_src =
+        \\pub const SafeAsync = module {
+        \\    in clk: clock,
+        \\    in rst: reset(.async),
+        \\    in async rx: u1,
+        \\    out q: u1,
+        \\    reg r: u1 = 0;
+        \\    comb {
+        \\        wire rx_sync = @sync2ff(clk, rx);
+        \\        r := rx_sync;
+        \\        q = r;
+        \\    }
+        \\};
+    ;
+    var p_safe = @import("parser.zig").Parser.init(std.testing.allocator, safe_async_src);
+    var ast_safe = try p_safe.parse();
+    defer ast_safe.deinit();
+    var elab_safe = @import("elaborator.zig").Elaborator.init(std.testing.allocator, &ast_safe);
+    defer elab_safe.deinit();
+    var hir_safe = try elab_safe.elaborate(null);
+    defer hir_safe.deinit();
+
+    var sv_buffer = ArrayList(u8).init(std.testing.allocator);
+    defer sv_buffer.deinit();
+    var sw = @import("codegen/systemverilog.zig").StringWriter{ .list = &sv_buffer };
+    var sv_emitter = @import("codegen/systemverilog.zig").SystemVerilogEmitter.init(std.testing.allocator);
+    try sv_emitter.emitDesign(&hir_safe, &sw);
+
+    const sv_code = sv_buffer.items;
+    try std.testing.expect(std.mem.indexOf(u8, sv_code, "_sync2ff") != null);
+    try runVerilatorLint(std.testing.allocator, sv_code);
+}
+
 
 
 

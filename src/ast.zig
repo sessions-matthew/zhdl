@@ -72,6 +72,7 @@ pub const Type = struct {
         },
         reset: struct {
             is_active_low: bool,
+            is_sync: bool = false,
         },
         struct_type: struct {
             decls: []Decl,
@@ -287,6 +288,7 @@ pub const ModuleItem = struct {
             dir: PortDir,
             name: []const u8,
             type_expr: *Type,
+            is_async: bool = false,
         },
         reg_decl: struct {
             name: []const u8,

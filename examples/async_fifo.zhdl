@@ -9,13 +9,13 @@
 
 pub module AsyncFifo {
     in wr_clk: clock,
-    in wr_rst_n: reset(.low),
+    in wr_rst_n: reset(.async, .active_low),
     in wr_en: u1,
     in wr_data: u16,
     out full: u1,
 
     in rd_clk: clock,
-    in rd_rst_n: reset(.low),
+    in rd_rst_n: reset(.async, .active_low),
     in rd_en: u1,
     out rd_data: u16,
     out empty: u1,
@@ -62,13 +62,13 @@ pub module AsyncFifo {
 
 test "AsyncFifo writes at 100MHz and reads at 33MHz across clock domains" {
     var wr_clk = clock(100MHz);
-    var wr_rst_n = reset(.active_low);
+    var wr_rst_n = reset(.async, .active_low);
     wire wr_en: u1;
     wire wr_data: u16;
     wire full: u1;
 
     var rd_clk = clock(33MHz);
-    var rd_rst_n = reset(.active_low);
+    var rd_rst_n = reset(.async, .active_low);
     wire rd_en: u1;
     wire rd_data: u16;
     wire empty: u1;

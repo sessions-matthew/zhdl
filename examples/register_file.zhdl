@@ -10,7 +10,7 @@
 
 pub module RegisterFile {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     // Read Port 1
     in rs1_addr: u5,
@@ -61,7 +61,7 @@ pub module RegisterFile {
 
 test "RegisterFile dual-read, write-forwarding, and x0 immutability" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     wire rs1_addr: u5;
     wire rs2_addr: u5;

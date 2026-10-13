@@ -2,7 +2,7 @@
 //! Demonstrates optional flat module syntax (no 'comb' block wrapper required).
 pub const Counter = module {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
     in en: u1,
     out count: u8,
     out overflow: u1,
@@ -26,7 +26,7 @@ pub const Counter = module {
 
 test "Counter increments and rolls over at 255" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
     wire en: u1;
     wire count: u8;
     wire overflow: u1;

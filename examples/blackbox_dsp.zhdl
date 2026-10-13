@@ -18,7 +18,7 @@ pub const XilinxDsp = extern("DSP48E1", .{ .include = "examples/xilinx_dsp48e1.v
 
 pub module DspMac {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
     in clear: u1,
     in data_a: u25,
     in data_b: u18,
@@ -52,7 +52,7 @@ pub module DspMac {
 
 test "DspMac accumulates multiple products" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
     wire clear: u1;
     wire data_a: u25;
     wire data_b: u18;

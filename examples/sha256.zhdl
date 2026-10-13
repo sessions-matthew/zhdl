@@ -50,7 +50,7 @@ const H7_INIT: u32 = 0x5be0cd19;
 
 pub module Sha256Core {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     in start: u1,
     in first_block: u1,
@@ -209,7 +209,7 @@ pub module Sha256Core {
 
 test "Sha256Core NIST FIPS 180-4 standard vector 'abc'" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     wire start: u1 = 0;
     wire first_block: u1 = 1;

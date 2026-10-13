@@ -9,7 +9,7 @@
 
 pub module RoundRobinArbiter {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     in request: u4,
     in acknowledge: u4,
@@ -73,7 +73,7 @@ pub module RoundRobinArbiter {
 
 test "RoundRobinArbiterTb" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     wire req: u4 = 0;
     wire ack: u4 = 0;

@@ -15,7 +15,7 @@ pub const Command = union(enum) {
 
 pub module PacketFilter(comptime W: usize) {
     in clk: clock,
-    in rst_n: reset(.low),
+    in rst_n: reset(.async, .active_low),
     in cmd: Command,
     out rx_stream: ?u(W),
 
@@ -44,7 +44,7 @@ pub module PacketFilter(comptime W: usize) {
 
 test "PacketFilter processes commands" {
     var clk = clock(100MHz);
-    var rst_n = reset(.active_low);
+    var rst_n = reset(.async, .active_low);
     wire cmd: Command;
     wire rx_stream: ?u8;
 

@@ -292,12 +292,21 @@ pub const SystemVerilogEmitter = struct {
             }
             const has_rst = (reg.rst_name != null);
             if (has_rst) {
-                if (reg.rst_active_low) {
-                    try writer.print("    always_ff @(posedge {s} or negedge {s}) begin\n", .{ reg.clk_name, reg.rst_name.? });
-                    try writer.print("        if (!{s}) begin\n", .{reg.rst_name.?});
+                if (reg.rst_is_sync) {
+                    try writer.print("    always_ff @(posedge {s}) begin\n", .{reg.clk_name});
+                    if (reg.rst_active_low) {
+                        try writer.print("        if (!{s}) begin\n", .{reg.rst_name.?});
+                    } else {
+                        try writer.print("        if ({s}) begin\n", .{reg.rst_name.?});
+                    }
                 } else {
-                    try writer.print("    always_ff @(posedge {s} or posedge {s}) begin\n", .{ reg.clk_name, reg.rst_name.? });
-                    try writer.print("        if ({s}) begin\n", .{reg.rst_name.?});
+                    if (reg.rst_active_low) {
+                        try writer.print("    always_ff @(posedge {s} or negedge {s}) begin\n", .{ reg.clk_name, reg.rst_name.? });
+                        try writer.print("        if (!{s}) begin\n", .{reg.rst_name.?});
+                    } else {
+                        try writer.print("    always_ff @(posedge {s} or posedge {s}) begin\n", .{ reg.clk_name, reg.rst_name.? });
+                        try writer.print("        if ({s}) begin\n", .{reg.rst_name.?});
+                    }
                 }
 
                 if (reg.hir_type.tag == .array) {

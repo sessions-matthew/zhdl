@@ -142,41 +142,85 @@ wire offset: i16 = -128;
 ### 3.2 Hardware Domain Types (`clock`, `reset`)
 
 Ports that represent clock and reset signals use explicit domain types:
-- `clock`: Identifies an edge-triggered clock signal (default `posedge`).
-- `reset`: Identifies an asynchronous or synchronous reset signal (default active-high).
-- `reset(.low)` / `reset(.high)`: Explicitly specifies reset polarity through the type system.
-- `reset_n` / `reset_low`: Convenient type aliases for active-low reset (`reset(.low)`).
+- `clock`: Identifies an edge-triggered clock signal (`posedge`).
+- `reset(.async, .active_low)` / `reset(.async, .active_high)` (or `reset(.async)`): Edge-triggered asynchronous reset.
+- `reset(.sync, .active_low)` / `reset(.sync, .active_high)` (or `reset(.sync)`): Clock-sampled synchronous reset.
 
-#### Explicit Reset Polarity (No Name Heuristics)
-ZHdl does not deduce reset polarity from variable names. Instead, reset polarity is strictly declared through the signal's type or explicit register configuration:
+> [!IMPORTANT]
+> **No Underspecified Resets**: Resets must explicitly declare their synchronization mode (`.async` or `.sync`). Bare `reset` or bare `reset()` without a mode is rejected at compile time with `error.UnderspecifiedReset`. This eliminates subtle synthesis-simulation mismatches and makes hardware reset trees 100% transparent.
+
+#### Explicit Reset Modes & SystemVerilog Emission
 
 ```zig
-// Active-high reset (default)
-in rst: reset,
+// Active-high asynchronous reset
+in rst_a: reset(.async),
 
-// Explicit active-low reset
-in rst_n: reset(.low),
+// Active-low asynchronous reset
+in rst_an: reset(.async, .active_low),
 
-// Explicit active-high reset (even if named with _n)
-in rst_n: reset(.high),
+// Active-high synchronous reset
+in rst_s: reset(.sync),
+
+// Active-low synchronous reset
+in rst_sn: reset(.sync, .active_low),
 ```
 
-The SystemVerilog codegen automatically emits the correct sensitivity list and condition based on the signal's type:
+The SystemVerilog codegen automatically emits the correct sensitivity list and reset branch:
 ```systemverilog
-// reset(.low)
-always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) ...
+// reset(.async, .active_low): edge-triggered in sensitivity list
+always_ff @(posedge clk or negedge rst_an) begin
+    if (!rst_an) begin ... end
+end
 
-// reset(.high) or reset
-always_ff @(posedge clk or posedge rst) begin
-    if (rst) ...
+// reset(.async): edge-triggered in sensitivity list
+always_ff @(posedge clk or posedge rst_a) begin
+    if (rst_a) begin ... end
+end
+
+// reset(.sync): strictly synchronous (NOT in sensitivity list)
+always_ff @(posedge clk) begin
+    if (rst_s) begin ... end
+end
 ```
 
-Registers can also explicitly override or specify polarity:
+### 3.3 Asynchronous Input Ports (`in async`) & Metastability Protection
+
+External physical inputs (such as UART RX lines, button presses, sensor interrupts, or external buses) operate asynchronously to the module's clock. ZHdl provides first-class support for declaring asynchronous inputs:
+
 ```zig
-reg(clk, rst, .low) count: u8 = 0;
-var state = reg(u8, .{ .clk = clk, .rst = rst, .active_low = true, .init = 0 });
+in async rx: u1,
 ```
+
+#### Compile-Time Metastability Enforcement
+The ZHdl compiler tracks all `async` input ports. If combinational dataflow reaches a clocked register without passing through a synchronizer, elaboration immediately halts with a compile error:
+
+```
+======================================================================
+COMPILE ERROR: Direct Sampling of Asynchronous Input in module 'UartRx'
+======================================================================
+Illegal asynchronous transfer from external async port 'rx' into clock domain 'clk':
+  Async input port:     'rx'
+  Destination register: 'rxd_reg' (clock: clk)
+  Dataflow path:        rx -> rxd_reg
+
+Reason:
+  Directly sampling an asynchronous input port without synchronization causes
+  metastability and non-deterministic logic failures.
+
+Fix:
+  Pass the asynchronous input through a 2-stage flip-flop synchronizer:
+    wire rx_sync = @sync2ff(clk, rx);
+======================================================================
+```
+
+To resolve this safely, use the built-in 2-stage flip-flop synchronizer:
+```zig
+comb {
+    wire rx_sync = @sync2ff(clk, rx);
+    rxd_reg := rx_sync;
+}
+```
+The output of `@sync2ff` is safely synchronized to `clk` and can be sampled by sequential registers.
 
 ### 3.3 Unpacked Arrays (`[N]T`)
 
@@ -1041,7 +1085,7 @@ A testbench declares test wires, instantiates the Device Under Test (DUT), and e
 ```zig
 test "Counter increments and rolls over at 255" {
     var clk = clock(100MHz); // 100 MHz clock (10ns period)
-    var rst = reset();       // Active-high reset (or reset(.active_low))
+    var rst = reset(.async); // Active-high asynchronous reset (or reset(.sync) / reset(.async, .active_low))
     wire en: u1;
     wire count: u8;
 
@@ -1053,7 +1097,7 @@ test "Counter increments and rolls over at 255" {
     });
 
     trace("counter_tb.vcd");
-    rst.pulse(2, clk);       // Hold reset for 2 cycles of clk
+    clk.pulse_reset(rst, 2); // Synchronously pulse reset for 2 clock cycles
     
     en = 1;
     clk.step(10);
@@ -1072,32 +1116,34 @@ Procedural stimulus statements execute sequentially in time. They can be written
 
 ### 11.3 Timing and Verification Primitives
 
-ZHdl enforces declarative clock and reset initialization and signal-centric simulation verbs:
+ZHdl clearly separates **synchronous (clock-bound)** stimulus from **asynchronous (real-time)** delays:
 
-| Simulation Primitive | Description | Generated SystemVerilog |
-|---|---|---|
-| `var clk = clock(100MHz)` / `clock(10ns)` | Declaratively spawns an oscillating clock generator at testbench scope | `always #5ns clk = ~clk;` |
-| `var rst = reset()` / `reset(.active_low)` | Declaratively defines a reset signal initialized to its inactive state | `logic rst = 0;` / `1;` |
-| `rst.pulse(cycles, clk)` / `rst.pulse(20ns)` | Asserts reset active, waits $N$ cycles on clock domain (or physical duration), then deasserts | Procedural reset sequence |
-| `clk.step(cycles)` | Synchronously advances simulation by $N$ rising edges of `clk` | `repeat (cycles) @(posedge clk);` |
-| `clk.posedge()` / `clk.negedge()` | Waits for the next rising or falling edge of `clk` | `@(posedge clk);` / `@(negedge clk);` |
-| `clk.wait_until(cond, timeout)` | Synchronously waits until `cond` is true on `clk` rising edges up to `timeout` cycles | Bounded cycle-accurate wait loop |
-| `delay(50ns)` / `delay(10us)` | Explicit physical delay with typed time units (`ps`, `ns`, `us`, `ms`, `s`) | `#50ns;` / `#10us;` |
-| `wait_for(cond, timeout)` | Waits until `cond` is asserted or fails after `timeout` (time or cycles) | `fork ... wait (cond); ... #timeout; ... join_any` |
-| `assert_within(cond, timeout)` | Asserts `cond` occurs within physical timeout or cycle limit | Bounded assertion verification |
-| `assert(cond, "msg")` | Hardware assertion check; aborts simulation with error code on failure | `if (!(cond)) begin $error("[FAIL] msg"); $fatal(1); end` |
-| `trace("path.vcd")` | Enables VCD waveform dump for GTKWave or VS Code Surfer | `$dumpfile("path.vcd"); $dumpvars(0, tb_mod);` |
-| `finish()` | Terminates simulation successfully | `$finish;` |
+| Simulation Primitive | Type | Description | Generated SystemVerilog |
+|---|---|---|---|
+| `var clk = clock(100MHz)` / `clock(10ns)` | Clock | Declaratively spawns an oscillating clock generator at testbench scope | `always #5ns clk = ~clk;` |
+| `var rst = reset(.async)` / `reset(.sync)` | Reset | Declaratively defines an active-high reset initialized to inactive | `logic rst = 0;` |
+| `var rst_n = reset(.async, .active_low)` | Reset | Declaratively defines an active-low reset initialized to inactive | `logic rst_n = 1;` |
+| `clk.pulse_reset(rst, cycles)` | Synchronous | Asserts reset synchronously across $N$ cycles of `clk`, then deasserts | `repeat (cycles) @(posedge clk);` |
+| `clk.step(cycles)` | Synchronous | Synchronously advances simulation by $N$ rising edges of `clk` | `repeat (cycles) @(posedge clk);` |
+| `clk.posedge()` / `clk.negedge()` | Synchronous | Waits for the next rising or falling edge of `clk` | `@(posedge clk);` / `@(negedge clk);` |
+| `clk.wait_until(cond, timeout)` | Synchronous | Synchronously waits until `cond` is true on `clk` rising edges up to `timeout` cycles | Bounded cycle-accurate wait loop |
+| `rst.pulse(20ns)` | Asynchronous | Asynchronously asserts reset for a physical duration, then deasserts | `rst = 1; #20ns; rst = 0;` |
+| `delay(50ns)` / `delay(10us)` | Asynchronous | Explicit physical delay with typed time units (`ps`, `ns`, `us`, `ms`, `s`) | `#50ns;` / `#10us;` |
+| `wait_for(cond, timeout)` | Verification | Waits until `cond` is asserted or fails after `timeout` (time or cycles) | `fork ... wait (cond); ... #timeout; ... join_any` |
+| `assert_within(cond, timeout)` | Verification | Asserts `cond` occurs within physical timeout or cycle limit | Bounded assertion verification |
+| `assert(cond, "msg")` | Verification | Hardware assertion check; aborts simulation with error code on failure | `if (!(cond)) begin $error("[FAIL] msg"); $fatal(1); end` |
+| `trace("path.vcd")` | Simulation | Enables VCD waveform dump for GTKWave or VS Code Surfer | `$dumpfile("path.vcd"); $dumpvars(0, tb_mod);` |
+| `finish()` | Simulation | Terminates simulation successfully | `$finish;` |
 
 #### Typed Time Literals
 Time quantities in testbenches support standard physical units:
 ```zig
 test "PacketRxTb" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     trace("wave.vcd");
-    rst.pulse(2, clk);
+    clk.pulse_reset(rst, 2);
 
     delay(250ps);          // Sub-nanosecond setup time modeling
     delay(50ns);           // Nanosecond timing

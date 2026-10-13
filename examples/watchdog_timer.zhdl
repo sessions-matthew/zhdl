@@ -12,7 +12,7 @@
 
 pub module WatchdogTimer {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     in enable: u1,
     in pet: u1,
@@ -69,7 +69,7 @@ pub module WatchdogTimer {
 
 test "WatchdogTimer handles service pet, warning interrupt, and timeout reset" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     wire enable: u1;
     wire pet: u1;

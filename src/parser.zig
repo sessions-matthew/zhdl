@@ -16,6 +16,7 @@ pub const ParseError = error{
     ExpectedBrace,
     ExpectedParen,
     ExpectedComma,
+    UnderspecifiedReset,
     OutOfMemory,
 };
 
@@ -460,12 +461,19 @@ pub const Parser = struct {
         while (!self.check(.r_brace) and !self.check(.eof)) {
             const item_loc = self.current.loc;
 
-            // Ports: in, out, inout
+            // Ports: in, out, inout (with optional 'async' qualifier)
+            var is_async_port = false;
+            if (self.match(.kw_async)) {
+                is_async_port = true;
+            }
             if (self.check(.kw_in) or self.check(.kw_out) or self.check(.kw_inout)) {
                 const dir: ast.PortDir = if (self.match(.kw_in)) .in else if (self.match(.kw_out)) .out else blk: {
                     _ = try self.expect(.kw_inout);
                     break :blk .inout;
                 };
+                if (!is_async_port and self.match(.kw_async)) {
+                    is_async_port = true;
+                }
                 const port_name = try self.expect(.identifier);
                 _ = try self.expect(.colon);
                 const port_type = try self.parseType(alloc);
@@ -480,6 +488,7 @@ pub const Parser = struct {
                             .dir = dir,
                             .name = port_name.slice,
                             .type_expr = port_type,
+                            .is_async = is_async_port,
                         },
                     },
                 });
@@ -1401,31 +1410,78 @@ pub const Parser = struct {
             // Check for reset or reset(...)
             if (std.mem.eql(u8, name, "reset")) {
                 var is_active_low = false;
+                var is_sync = false;
+                var has_mode = false;
                 if (self.match(.l_paren)) {
-                    if (self.match(.dot)) {
-                        const pol_tok = try self.expect(.identifier);
-                        if (std.mem.eql(u8, pol_tok.slice, "low") or std.mem.eql(u8, pol_tok.slice, "active_low")) {
-                            is_active_low = true;
-                        } else if (std.mem.eql(u8, pol_tok.slice, "high") or std.mem.eql(u8, pol_tok.slice, "active_high")) {
-                            is_active_low = false;
+                    while (!self.check(.r_paren) and !self.check(.eof)) {
+                        _ = self.match(.dot);
+                        var tok_slice: []const u8 = "";
+                        if (self.match(.kw_async)) {
+                            tok_slice = "async";
+                        } else if (self.match(.kw_sync)) {
+                            tok_slice = "sync";
+                        } else if (self.check(.identifier)) {
+                            const tok = try self.expect(.identifier);
+                            tok_slice = tok.slice;
                         } else {
                             return error.UnexpectedToken;
                         }
-                    } else if (self.check(.identifier)) {
-                        const pol_tok = self.current;
-                        self.advance();
-                        if (std.mem.eql(u8, pol_tok.slice, "low") or std.mem.eql(u8, pol_tok.slice, "active_low")) {
+
+                        if (std.mem.eql(u8, tok_slice, "low") or std.mem.eql(u8, tok_slice, "active_low")) {
                             is_active_low = true;
-                        } else if (std.mem.eql(u8, pol_tok.slice, "high") or std.mem.eql(u8, pol_tok.slice, "active_high")) {
+                        } else if (std.mem.eql(u8, tok_slice, "high") or std.mem.eql(u8, tok_slice, "active_high")) {
                             is_active_low = false;
+                        } else if (std.mem.eql(u8, tok_slice, "async")) {
+                            is_sync = false;
+                            has_mode = true;
+                        } else if (std.mem.eql(u8, tok_slice, "sync")) {
+                            is_sync = true;
+                            has_mode = true;
+                        } else if (std.mem.eql(u8, tok_slice, "async_low")) {
+                            is_sync = false;
+                            is_active_low = true;
+                            has_mode = true;
+                        } else if (std.mem.eql(u8, tok_slice, "async_high")) {
+                            is_sync = false;
+                            is_active_low = false;
+                            has_mode = true;
+                        } else if (std.mem.eql(u8, tok_slice, "sync_low")) {
+                            is_sync = true;
+                            is_active_low = true;
+                            has_mode = true;
+                        } else if (std.mem.eql(u8, tok_slice, "sync_high")) {
+                            is_sync = true;
+                            is_active_low = false;
+                            has_mode = true;
                         } else {
                             return error.UnexpectedToken;
                         }
-                    } else {
-                        return error.UnexpectedToken;
+                        _ = self.match(.comma);
                     }
                     _ = try self.expect(.r_paren);
                 }
+
+                if (!has_mode) {
+                    std.debug.print(
+                        \\
+                        \\======================================================================
+                        \\COMPILE ERROR: Underspecified Reset Mode
+                        \\======================================================================
+                        \\Resets must explicitly declare their synchronization mode:
+                        \\  .async - Asynchronous reset (edge-triggered: @(posedge clk or posedge/negedge rst))
+                        \\  .sync  - Synchronous reset (clock-sampled: @(posedge clk) if (rst)...)
+                        \\
+                        \\Fix:
+                        \\  reset(.async)              // Active-high asynchronous reset
+                        \\  reset(.async, .active_low) // Active-low asynchronous reset
+                        \\  reset(.sync)               // Active-high synchronous reset
+                        \\  reset(.sync, .active_low)  // Active-low synchronous reset
+                        \\======================================================================
+                        \\
+                    , .{});
+                    return error.UnderspecifiedReset;
+                }
+
                 const t = try alloc.create(ast.Type);
                 t.* = .{
                     .tag = .reset,
@@ -1433,6 +1489,7 @@ pub const Parser = struct {
                     .data = .{
                         .reset = .{
                             .is_active_low = is_active_low,
+                            .is_sync = is_sync,
                         },
                     },
                 };
@@ -1440,17 +1497,18 @@ pub const Parser = struct {
             }
 
             if (std.mem.eql(u8, name, "reset_n") or std.mem.eql(u8, name, "reset_low")) {
-                const t = try alloc.create(ast.Type);
-                t.* = .{
-                    .tag = .reset,
-                    .loc = type_loc,
-                    .data = .{
-                        .reset = .{
-                            .is_active_low = true,
-                        },
-                    },
-                };
-                return t;
+                std.debug.print(
+                    \\
+                    \\======================================================================
+                    \\COMPILE ERROR: Deprecated Bare '{s}' Type
+                    \\======================================================================
+                    \\Resets must explicitly declare their synchronization mode:
+                    \\  reset(.async, .active_low)
+                    \\  reset(.sync, .active_low)
+                    \\======================================================================
+                    \\
+                , .{name});
+                return error.UnderspecifiedReset;
             }
 
             // Named type like clock, or custom type (including dotted pkg.Type)
@@ -2115,13 +2173,20 @@ pub const Parser = struct {
                 }
             }
 
-            const field = try self.expect(.identifier);
+            const field_slice = if (self.check(.identifier))
+                (try self.expect(.identifier)).slice
+            else if (self.match(.kw_async))
+                "async"
+            else if (self.match(.kw_sync))
+                "sync"
+            else
+                (try self.expect(.identifier)).slice;
             const e = try alloc.create(ast.Expr);
             e.* = .{
                 .tag = .enum_literal,
                 .loc = loc,
                 .data = .{
-                    .enum_literal = field.slice,
+                    .enum_literal = field_slice,
                 },
             };
             return e;
@@ -2286,7 +2351,7 @@ pub const Parser = struct {
         }
 
         // Identifier, keyword call (clock, reset), or Named struct init: MyStruct{ .field1 = val1, ... }
-        if (self.check(.identifier) or self.check(.kw_clock) or self.check(.kw_reset)) {
+        if (self.check(.identifier) or self.check(.kw_clock) or self.check(.kw_reset) or self.check(.kw_async)) {
             const name = self.current.slice;
             const id_loc = self.current.loc;
             self.advance();

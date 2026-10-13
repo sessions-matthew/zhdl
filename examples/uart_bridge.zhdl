@@ -21,7 +21,7 @@ pub module Crc16Ccitt {
 
 pub module UartBridge {
     in clk: clock,
-    in rst_n: reset(.low),
+    in rst_n: reset(.async, .active_low),
 
     // Interface with STM32 LPUART1
     in tx_byte_valid: u1,
@@ -172,7 +172,7 @@ pub module UartBridge {
 
 test "UartBridge framing, CRC16 verification, and host injection FIFO" {
     var clk = clock(100MHz);
-    var rst_n = reset(.active_low);
+    var rst_n = reset(.async, .active_low);
 
     wire tx_byte_valid: u1;
     wire tx_byte: u8;

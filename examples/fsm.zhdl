@@ -1,7 +1,7 @@
 //! Zero-Latch Finite State Machine with Strict Enums
 pub module FSM {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
     in start: u1,
     out busy: u1,
     out done_pulse: u1,
@@ -45,7 +45,7 @@ pub module FSM {
 
 test "FSM cycles through idle, read, write, and done states" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
     wire start: u1;
     wire busy: u1;
     wire done_pulse: u1;

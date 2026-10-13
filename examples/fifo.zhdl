@@ -13,7 +13,7 @@
 
 pub module AxisFifo {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     // AXI-Stream Slave (Input)
     in s_axis_tdata: u8,
@@ -66,7 +66,7 @@ pub module AxisFifo {
 
 test "AxisFifo burst push, full, burst pop, and concurrent streaming testbench" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     wire s_axis_tdata: u8 = 0;
     wire s_axis_tvalid: u1 = 0;

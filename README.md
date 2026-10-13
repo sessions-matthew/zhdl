@@ -37,7 +37,7 @@ pub const Command = union(enum) {
 
 pub module PacketFilter(comptime W: usize) {
     in clk: clock,
-    in rst_n: reset(.low),
+    in rst_n: reset(.async, .active_low),
     in cmd: Command,
     out rx_stream: ?u(W),
 
@@ -66,7 +66,7 @@ pub module PacketFilter(comptime W: usize) {
 
 test "PacketFilter processes commands" {
     var clk = clock(100MHz); // Declarative clock oscillator with frequency literal
-    var rst_n = reset(.active_low); // Declarative active-low reset
+    var rst_n = reset(.async, .active_low); // Explicit asynchronous active-low reset
     wire cmd: Command;
     wire rx_stream: ?u8;
 
@@ -78,7 +78,7 @@ test "PacketFilter processes commands" {
     });
 
     trace("filter_tb.vcd");
-    rst_n.pulse(20ns);    // Asynchronous real-time reset pulse
+    clk.pulse_reset(rst_n, 2); // Synchronous 2-cycle reset pulse on clock
 
     cmd = Command{ .ping = 0xA5 };
     clk.step(1);          // Synchronous clock step method
@@ -145,10 +145,15 @@ ZHdl brings Zig's type safety, expressive layouts, and first-class algebraic dat
 - **Signed Integers (`i1` to `i128`, `i(W)`)**: Two's complement arithmetic, automatically emitting SystemVerilog `logic signed` with signed comparisons (`<`, `<=`, `>`, `>=`) and arithmetic (`*`, `+%`, `-%`).
 - **Generic Sizing**: Parameterized bit widths like `u(W)` or `i(DATA_WIDTH)` resolve cleanly at elaboration time.
 
-### 2. Domain Types (`clock`, `reset`)
+### 2. Domain Types (`clock`, `reset`) & Explicit Modes
 - **`clock`**: Edge-triggered clock domain (`posedge`).
-- **`reset`**: Active-high reset signal.
-- **`reset(.low)` / `reset(.high)`**: Explicit reset polarity enforced by the type system—no variable name heuristics. Generates correct sensitivity lists (`@(posedge clk or negedge rst_n)`) and reset assertions (`if (!rst_n)`).
+- **`reset(.async)` / `reset(.async, .active_low)`**: Asynchronous reset (edge-triggered: `always_ff @(posedge clk or posedge/negedge rst)`).
+- **`reset(.sync)` / `reset(.sync, .active_low)`**: Synchronous reset (clock-sampled: `always_ff @(posedge clk)` with `if (rst)`).
+- **Underspecified Reset Protection**: Bare `reset` without `.async` or `.sync` is rejected at compile time (`error.UnderspecifiedReset`), preventing ambiguity in hardware reset strategies.
+
+### 3. Asynchronous Input Qualifier (`in async`) & Static CDC
+- **`in async pin: type`**: Marks external pins that are asynchronous to the module clock.
+- **Metastability Enforcement**: Directly sampling an `async` input into a normal register triggers `error.DirectAsyncInputSampling` at elaboration. External signals must be passed through `@sync2ff(clk, pin)`.
 
 ### 3. Unpacked Memory Arrays (`[N]T`)
 Hardware RAMs, register files, and FIFO buffers are declared using unpacked arrays:

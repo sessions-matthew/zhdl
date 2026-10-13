@@ -10,7 +10,7 @@
 
 pub module ServAlu {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     // State inputs
     in i_en: u1,
@@ -81,7 +81,7 @@ pub module ServAlu {
 
 test "ServAluTb" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     wire i_en: u1 = 0;
     wire i_cnt0: u1 = 0;

@@ -42,6 +42,7 @@ pub const HirType = struct {
     width: u32, // total bit width
     is_signed: bool = false,
     is_active_low: bool = false,
+    is_sync: bool = false,
     name: []const u8 = "",
     enum_variants: []HirEnumVariant = &.{},
     struct_fields: []HirStructField = &.{},
@@ -185,6 +186,7 @@ pub const HirPort = struct {
     name: []const u8,
     dir: HirPortDir,
     hir_type: HirType,
+    is_async: bool = false,
 };
 
 pub const HirRegister = struct {
@@ -195,6 +197,7 @@ pub const HirRegister = struct {
     clk_name: []const u8,
     rst_name: ?[]const u8,
     rst_active_low: bool = false,
+    rst_is_sync: bool = false,
     init_val: u64,
     is_sync_stage: bool = false,
 };

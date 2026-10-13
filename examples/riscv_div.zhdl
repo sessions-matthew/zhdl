@@ -9,7 +9,7 @@
 
 pub module RiscvDiv {
     in clk: clock,
-    in resetn: reset(.low),
+    in resetn: reset(.async, .active_low),
 
     in pcpi_valid: u1,
     in pcpi_insn: u32,
@@ -123,7 +123,7 @@ pub module RiscvDiv {
 
 test "RiscvDivTb" {
     var clk = clock(100MHz);
-    var resetn = reset(.active_low);
+    var resetn = reset(.async, .active_low);
 
     wire pcpi_valid: u1 = 0;
     wire pcpi_insn: u32 = 0;

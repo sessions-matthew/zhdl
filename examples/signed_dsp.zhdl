@@ -10,7 +10,7 @@
 
 pub module SignedDspMac {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     in sample_in: i16,
     in coeff: i8,
@@ -62,7 +62,7 @@ pub module SignedDspMac {
 
 test "SignedDspMac handles signed arithmetic, negative products, and saturation" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
 
     wire sample_in: i16;
     wire coeff: i8;

@@ -73,7 +73,7 @@ pub const DecodedOp = union(enum) {
 
 pub module RiscvDecoder {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
     in pc: u32,
     in instr: u32,
     in rs1_data: u32,
@@ -153,7 +153,7 @@ pub module RiscvDecoder {
 
 test "RiscvDecoder decodes and executes RV32I instructions" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
     wire pc: u32;
     wire instr: u32;
     wire rs1_data: u32;

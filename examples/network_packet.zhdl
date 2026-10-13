@@ -35,7 +35,7 @@ pub const IPv4Header = packed struct {
 
 pub module NetworkPacketEngine {
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
 
     // Big-endian network data inputs
     in net_word: u32,
@@ -89,7 +89,7 @@ pub module NetworkPacketEngine {
 
 test "NetworkPacketEngine performs byteSwap, bitReverse, and unrolled parity" {
     var clk = clock(100MHz);
-    var rst = reset();
+    var rst = reset(.async);
     wire net_word: u32;
     wire net_byte: u8;
     wire process_en: u1;

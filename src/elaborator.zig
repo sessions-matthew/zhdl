@@ -2192,6 +2192,7 @@ pub const Elaborator = struct {
         var default_clk_name: ?[]const u8 = null;
         var default_rst_name: ?[]const u8 = null;
         var default_rst_active_low = false;
+        var default_rst_is_sync = false;
         var local_consts = std.StringHashMap(u64).init(alloc);
 
         for (items) |item| {
@@ -2206,6 +2207,7 @@ pub const Elaborator = struct {
                         if (default_rst_name == null) {
                             default_rst_name = p.name;
                             default_rst_active_low = ht.is_active_low;
+                            default_rst_is_sync = ht.is_sync;
                         }
                     }
                     try signal_types.put(p.name, ht);
@@ -2273,6 +2275,7 @@ pub const Elaborator = struct {
                             .inout => .inout,
                         },
                         .hir_type = h_type,
+                        .is_async = p.is_async,
                     });
                     try signal_types.put(p.name, h_type);
                 },
@@ -2319,13 +2322,16 @@ pub const Elaborator = struct {
                     } else default_rst_name;
 
                     var rst_active_low = false;
+                    var rst_is_sync = false;
                     if (r.rst_polarity) |pol| {
                         rst_active_low = pol;
                     } else if (rst_str) |s| {
                         if (signal_types.get(s)) |st| {
                             rst_active_low = st.is_active_low;
+                            rst_is_sync = st.is_sync;
                         } else if (std.mem.eql(u8, s, default_rst_name orelse "")) {
                             rst_active_low = default_rst_active_low;
+                            rst_is_sync = default_rst_is_sync;
                         }
                     }
                     var init_val: u64 = if (r.init_val.tag == .number) r.init_val.data.number.val else 0;
@@ -2352,6 +2358,7 @@ pub const Elaborator = struct {
                         .clk_name = clk_str,
                         .rst_name = rst_str,
                         .rst_active_low = rst_active_low,
+                        .rst_is_sync = rst_is_sync,
                         .init_val = init_val,
                     };
 
@@ -2612,7 +2619,7 @@ pub const Elaborator = struct {
             try self.checkReadBeforeWrite(alloc, mod_name, ports.items, local_signals.items, comb_stmts.items, &reg_map, instances.items, module_ports);
 
             // 4. Clock Domain Crossing (CDC) verification (no unsynchronized multi-clock domain sampling)
-            try self.checkClockDomainCrossing(alloc, mod_name, registers.items, comb_stmts.items, &reg_map);
+            try self.checkClockDomainCrossing(alloc, mod_name, registers.items, comb_stmts.items, &reg_map, ports.items);
         }
 
         return .{
@@ -2667,8 +2674,13 @@ pub const Elaborator = struct {
                         try signals.append(.{ .name = c.name, .hir_type = h_type });
                         try signal_types.put(c.name, h_type);
                     } else if (isResetCall(c.val)) {
-                        const is_active_low = extractResetPolarity(c.val);
-                        const h_type: hir.HirType = .{ .tag = .reset, .width = 1, .is_active_low = is_active_low };
+                        const rst_info = try extractResetInfo(c.name, c.val);
+                        const h_type: hir.HirType = .{
+                            .tag = .reset,
+                            .width = 1,
+                            .is_active_low = rst_info.is_active_low,
+                            .is_sync = rst_info.is_sync,
+                        };
                         try signals.append(.{ .name = c.name, .hir_type = h_type });
                         try signal_types.put(c.name, h_type);
                     } else if (c.type_annot) |ta| {
@@ -2714,8 +2726,13 @@ pub const Elaborator = struct {
                             try signals.append(.{ .name = vd.name, .hir_type = h_type });
                             try signal_types.put(vd.name, h_type);
                         } else if (isResetCall(vd.init_val)) {
-                            const is_active_low = extractResetPolarity(vd.init_val);
-                            const h_type: hir.HirType = .{ .tag = .reset, .width = 1, .is_active_low = is_active_low };
+                            const rst_info = try extractResetInfo(vd.name, vd.init_val);
+                            const h_type: hir.HirType = .{
+                                .tag = .reset,
+                                .width = 1,
+                                .is_active_low = rst_info.is_active_low,
+                                .is_sync = rst_info.is_sync,
+                            };
                             try signals.append(.{ .name = vd.name, .hir_type = h_type });
                             try signal_types.put(vd.name, h_type);
                         } else if (vd.type_annot) |ta| {
@@ -2755,8 +2772,13 @@ pub const Elaborator = struct {
                                 try signals.append(.{ .name = vd.name, .hir_type = h_type });
                                 try signal_types.put(vd.name, h_type);
                             } else if (isResetCall(vd.init_val)) {
-                                const is_active_low = extractResetPolarity(vd.init_val);
-                                const h_type: hir.HirType = .{ .tag = .reset, .width = 1, .is_active_low = is_active_low };
+                                const rst_info = try extractResetInfo(vd.name, vd.init_val);
+                                const h_type: hir.HirType = .{
+                                    .tag = .reset,
+                                    .width = 1,
+                                    .is_active_low = rst_info.is_active_low,
+                                    .is_sync = rst_info.is_sync,
+                                };
                                 try signals.append(.{ .name = vd.name, .hir_type = h_type });
                                 try signal_types.put(vd.name, h_type);
                             } else if (vd.type_annot) |ta| {
@@ -3078,27 +3100,75 @@ pub const Elaborator = struct {
         };
     }
 
-    fn extractResetPolarity(val: *ast.Expr) bool {
+    pub const ResetInfo = struct {
+        is_active_low: bool = false,
+        is_sync: bool = false,
+    };
+
+    fn extractResetInfo(rst_name: []const u8, val: *ast.Expr) !ResetInfo {
         const c = val.data.call;
-        if (c.args.len > 0) {
-            const arg = c.args[0];
+        var has_mode = false;
+        var is_sync = false;
+        var is_active_low = false;
+
+        for (c.args) |arg| {
+            var tok: []const u8 = "";
             if (arg.tag == .enum_literal) {
-                const lit = arg.data.enum_literal;
-                if (std.mem.eql(u8, lit, "low") or std.mem.eql(u8, lit, "active_low")) {
-                    return true;
-                } else if (std.mem.eql(u8, lit, "high") or std.mem.eql(u8, lit, "active_high")) {
-                    return false;
-                }
+                tok = arg.data.enum_literal;
             } else if (arg.tag == .identifier) {
-                const id = arg.data.identifier;
-                if (std.mem.eql(u8, id, "low") or std.mem.eql(u8, id, "active_low")) {
-                    return true;
-                } else if (std.mem.eql(u8, id, "high") or std.mem.eql(u8, id, "active_high")) {
-                    return false;
-                }
+                tok = arg.data.identifier;
+            }
+
+            if (std.mem.eql(u8, tok, "low") or std.mem.eql(u8, tok, "active_low")) {
+                is_active_low = true;
+            } else if (std.mem.eql(u8, tok, "high") or std.mem.eql(u8, tok, "active_high")) {
+                is_active_low = false;
+            } else if (std.mem.eql(u8, tok, "async")) {
+                is_sync = false;
+                has_mode = true;
+            } else if (std.mem.eql(u8, tok, "sync")) {
+                is_sync = true;
+                has_mode = true;
+            } else if (std.mem.eql(u8, tok, "async_low")) {
+                is_sync = false;
+                is_active_low = true;
+                has_mode = true;
+            } else if (std.mem.eql(u8, tok, "async_high")) {
+                is_sync = false;
+                is_active_low = false;
+                has_mode = true;
+            } else if (std.mem.eql(u8, tok, "sync_low")) {
+                is_sync = true;
+                is_active_low = true;
+                has_mode = true;
+            } else if (std.mem.eql(u8, tok, "sync_high")) {
+                is_sync = true;
+                is_active_low = false;
+                has_mode = true;
             }
         }
-        return false;
+
+        if (!has_mode) {
+            std.debug.print(
+                \\
+                \\======================================================================
+                \\COMPILE ERROR: Underspecified Reset Mode for '{s}'
+                \\======================================================================
+                \\Resets must explicitly declare their synchronization mode:
+                \\  reset(.async)
+                \\  reset(.async, .active_low)
+                \\  reset(.sync)
+                \\  reset(.sync, .active_low)
+                \\======================================================================
+                \\
+            , .{rst_name});
+            return error.UnderspecifiedReset;
+        }
+
+        return .{
+            .is_active_low = is_active_low,
+            .is_sync = is_sync,
+        };
     }
 
     fn hasDotNext(target: *const ast.Expr) bool {
@@ -3593,6 +3663,33 @@ pub const Elaborator = struct {
                                             .clk_name = clk_name,
                                             .cycles = cycles,
                                             .duration_raw = duration_raw,
+                                            .active_low = active_low,
+                                        },
+                                    },
+                                });
+                                return;
+                            } else if (std.mem.eql(u8, ma.field, "pulse_reset")) {
+                                const clk_name = obj_name;
+                                var rst_name: []const u8 = "rst";
+                                var cycles: u64 = 1;
+                                if (c.args.len > 0 and c.args[0].tag == .identifier) {
+                                    rst_name = c.args[0].data.identifier;
+                                }
+                                if (c.args.len > 1 and c.args[1].tag == .number) {
+                                    cycles = c.args[1].data.number.val;
+                                }
+                                var active_low = false;
+                                if (signal_types.get(rst_name)) |st| {
+                                    active_low = st.is_active_low;
+                                }
+                                try sim_stmts.append(.{
+                                    .tag = .rst_pulse,
+                                    .data = .{
+                                        .rst_pulse = .{
+                                            .rst_name = rst_name,
+                                            .clk_name = clk_name,
+                                            .cycles = cycles,
+                                            .duration_raw = null,
                                             .active_low = active_low,
                                         },
                                     },
@@ -5693,11 +5790,21 @@ pub const Elaborator = struct {
                 if (std.mem.eql(u8, name, "clock")) {
                     return .{ .tag = .clock, .width = 1 };
                 }
-                if (std.mem.eql(u8, name, "reset")) {
-                    return .{ .tag = .reset, .width = 1, .is_active_low = false };
-                }
-                if (std.mem.eql(u8, name, "reset_n") or std.mem.eql(u8, name, "reset_low")) {
-                    return .{ .tag = .reset, .width = 1, .is_active_low = true };
+                if (std.mem.eql(u8, name, "reset") or std.mem.eql(u8, name, "reset_n") or std.mem.eql(u8, name, "reset_low")) {
+                    std.debug.print(
+                        \\
+                        \\======================================================================
+                        \\COMPILE ERROR: Underspecified Reset Mode for '{s}'
+                        \\======================================================================
+                        \\Resets must explicitly declare their synchronization mode:
+                        \\  reset(.async)
+                        \\  reset(.async, .active_low)
+                        \\  reset(.sync)
+                        \\  reset(.sync, .active_low)
+                        \\======================================================================
+                        \\
+                    , .{name});
+                    return error.UnderspecifiedReset;
                 }
                 if (self.types.get(name)) |found| {
                     return found;
@@ -5709,6 +5816,7 @@ pub const Elaborator = struct {
                     .tag = .reset,
                     .width = 1,
                     .is_active_low = t.data.reset.is_active_low,
+                    .is_sync = t.data.reset.is_sync,
                 };
             },
             .enum_type => {
@@ -6785,6 +6893,7 @@ pub const Elaborator = struct {
         current_signal: []const u8,
         dest_reg: *const hir.HirRegister,
         reg_by_q: *const std.StringHashMap(hir.HirRegister),
+        async_ports: *const std.StringHashMap(void),
         dep_graph: *const std.StringHashMap(ArrayList([]const u8)),
         visited: *std.StringHashMap(void),
         path: *ArrayList([]const u8),
@@ -6795,6 +6904,63 @@ pub const Elaborator = struct {
         try visited.put(current_signal, {});
         try path.append(current_signal);
         defer _ = path.pop();
+
+        // Check if current_signal is an asynchronous input port
+        if (async_ports.contains(current_signal)) {
+            var path_str = ArrayList(u8).init(alloc);
+            try path_str.appendSlice(current_signal);
+
+            if (path.items.len > 2) {
+                var idx = path.items.len - 2;
+                while (idx >= 1) : (idx -= 1) {
+                    const node = path.items[idx];
+                    if (!std.mem.eql(u8, node, current_signal) and
+                        !std.mem.eql(u8, node, dest_reg.d_name) and
+                        !std.mem.eql(u8, node, dest_reg.name))
+                    {
+                        try path_str.appendSlice(" -> ");
+                        try path_str.appendSlice(node);
+                    }
+                }
+            }
+            try path_str.appendSlice(" -> ");
+            try path_str.appendSlice(dest_reg.name);
+
+            std.debug.print(
+                \\
+                \\======================================================================
+                \\COMPILE ERROR: Direct Sampling of Asynchronous Input in module '{s}'
+                \\======================================================================
+                \\Illegal asynchronous transfer from external async port '{s}' into clock domain '{s}':
+                \\  Async input port:     '{s}'
+                \\  Destination register: '{s}' (clock: {s})
+                \\  Dataflow path:        {s}
+                \\
+                \\Reason:
+                \\  Directly sampling an asynchronous input port without synchronization causes
+                \\  metastability and non-deterministic logic failures.
+                \\
+                \\Fix:
+                \\  Pass the asynchronous input through a 2-stage flip-flop synchronizer:
+                \\    wire {s}_sync = @sync2ff({s}, {s});
+                \\======================================================================
+                \\
+                , .{
+                    mod_name,
+                    current_signal,
+                    dest_reg.clk_name,
+                    current_signal,
+                    dest_reg.name,
+                    dest_reg.clk_name,
+                    path_str.items,
+                    current_signal,
+                    dest_reg.clk_name,
+                    current_signal,
+                },
+            );
+
+            return error.DirectAsyncInputSampling;
+        }
 
         // Check if current_signal is a register output
         if (reg_by_q.get(current_signal)) |src_reg| {
@@ -6867,6 +7033,7 @@ pub const Elaborator = struct {
                     src,
                     dest_reg,
                     reg_by_q,
+                    async_ports,
                     dep_graph,
                     visited,
                     path,
@@ -6884,18 +7051,26 @@ pub const Elaborator = struct {
         registers: []const hir.HirRegister,
         comb_stmts: []const hir.HirStatement,
         reg_map: *const std.StringHashMap(hir.HirRegister),
+        ports: []const hir.HirPort,
     ) !void {
         _ = self;
         _ = reg_map;
 
-        // 1. Collect distinct clock domains
+        // 1. Collect distinct clock domains and async input ports
         var clk_domains = std.StringHashMap(void).init(alloc);
         for (registers) |r| {
             try clk_domains.put(r.clk_name, {});
         }
 
-        // Fast path: single-clock designs have 0 overhead
-        if (clk_domains.count() <= 1) {
+        var async_ports = std.StringHashMap(void).init(alloc);
+        for (ports) |p| {
+            if (p.is_async and p.dir == .in) {
+                try async_ports.put(p.name, {});
+            }
+        }
+
+        // Fast path: single-clock designs with no async inputs have 0 overhead
+        if (clk_domains.count() <= 1 and async_ports.count() == 0) {
             return;
         }
 
@@ -6927,6 +7102,7 @@ pub const Elaborator = struct {
                         src,
                         &dest_reg,
                         &reg_by_q,
+                        &async_ports,
                         &dep_graph,
                         &visited,
                         &path,
