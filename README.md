@@ -35,13 +35,14 @@ pub const Command = union(enum) {
     idle: void,
 };
 
-pub module PacketFilter(comptime W: usize) {
+pub module PacketFilter(
+    comptime W: usize,
     in clk: clock,
     in rst_n: reset(.async, .active_low),
     in async ext_enable: u1, // Asynchronous external pin safely synchronized
     in cmd: Command,
     out rx_stream: ?u(W),
-
+) {
     reg active_header: ?PacketHeader = null;
 
     comb {
@@ -121,6 +122,12 @@ zig build -Doptimize=ReleaseFast
 
 ### Core Commands
 ```bash
+# Desugar HDL sugar to pure Zig eDSL virtual code (auto-formatted with Zig AST renderer)
+./zhdl desugar examples/counter.zhdl -o counter.zig
+
+# Format Zig/eDSL source files using Zig's AST formatter
+./zhdl fmt examples/counter.zig
+
 # Compile ZHdl to synthesizable SystemVerilog
 ./zhdl compile examples/counter.zhdl -o counter.sv
 
@@ -227,12 +234,33 @@ switch (cmd) {
 }
 ```
 
-### 7. Comptime Generics (`module(params)`)
-Parameterized module templates without boilerplate double-nesting:
+### 7. Comptime Generics & ANSI Port Declarations (`module(...)`)
+Module ports and compile-time generics are declared inside the module header with commas, cleanly separating interface signals from internal registers and logic:
 ```zig
-pub module Fifo(comptime DEPTH: usize, comptime WIDTH: usize) { ... }
-// Or without explicit comptime keyword:
-pub module Counter(WIDTH: usize) { ... }
+// Generic parameterized module:
+pub module Fifo(
+    comptime DEPTH: usize,
+    comptime WIDTH: usize,
+    in clk: clock,
+    in rst_n: reset(.async, .active_low),
+    in wr_en: u1,
+    in wr_data: u(WIDTH),
+    out full: u1,
+) {
+    reg wr_ptr: u(DEPTH) = 0;
+    ...
+}
+
+// Parameterless module:
+pub module Counter(
+    in clk: clock,
+    in rst: reset(.async),
+    in en: u1,
+    out count: u8,
+) {
+    reg count_reg: u8 = 0;
+    ...
+}
 ```
 
 ### 8. Multi-File Modularity (`@import`)
@@ -241,12 +269,12 @@ First-class multi-file imports for modules, generic templates, packed structs, c
 const math = @import("math_pkg.zhdl");
 const Adder = @import("alu.zhdl").Adder;
 
-pub module Top {
+pub module Top(
     in x: u8,
     in y: u8,
     out sum: u8,
     out prod: u16,
-
+) {
     const add0 = Adder.instantiate(.{ .a = x, .b = y, .sum = sum });
     const mult = math.Multiplier.instantiate(.{ .a = x, .b = y, .product = prod });
 }
@@ -259,11 +287,9 @@ Bare `struct { ... }` blocks act as declaration containers with **zero hardware 
 ```zig
 pub const Math = struct {
     pub const SCALE = 4;
-    pub const Multiplier = module {
-        in a: u8,
-        out y: u8,
+    pub module Multiplier(in a: u8, out y: u8) {
         comb { y = a * 2; }
-    };
+    }
     pub fn doubleVal(v: u8) u8 { return v * 2; }
 };
 
@@ -284,13 +310,33 @@ wire busy = state.isBusy();
 
 ## Language Architecture & Verification
 
-- **Declarative Module Scope & Explicit `comb` Blocks**: Module root is strictly declarative (ports, continuous wire assignments, constants, sub-module instantiations, and register declarations). All procedural combinational logic, control flow (`if`, `switch`, loops), and register updates must be enclosed in explicit `comb { ... }` blocks ("The One Obvious Way"). Bare anonymous `{ ... }` blocks, floating control-flow, and bare register updates at module root are rejected at compile time.
+- **Verilog ANSI-Style Port Declarations & Body Semicolons ("The One Obvious Way")**: Module interfaces and comptime generic parameters are declared inside parentheses `module Name(in clk: clock, out y: u8)` separated by commas `,`. Internal registers, wires, constants, submodule instantiations, and logic blocks reside inside the body `{ ... }` terminated by semicolons `;`.
+- **Declarative Module Scope & Explicit `comb` Blocks**: Module root is strictly declarative (continuous wire assignments, constants, sub-module instantiations, and register declarations). All procedural combinational logic, control flow (`if`, `switch`, loops), and register updates must be enclosed in explicit `comb { ... }` blocks ("The One Obvious Way"). Bare anonymous `{ ... }` blocks, floating control-flow, and bare register updates at module root are rejected at compile time.
 - **Clock Binding to Registers (No `sync` Blocks)**: Clocks and resets are bound directly to registers (`reg(clk, rst)`). Legacy `sync` blocks are deprecated with actionable compiler errors.
 - **Flat Testbenches (`test "name" { ... }`)**: Write testbench stimulus, clock generation, reset pulses, stepping, and assertions directly at the top level of `test` blocks.
 - **Race-Condition & Read-Before-Write Prevention**: Static analysis verifies combinational wires are written before read, and unifies all procedural logic into a single SystemVerilog `always_comb` process to eliminate simulator delta-cycle event races.
 - **Single-Writer Rule**: Multiple concurrent drivers on the same wire or port contention are rejected during semantic elaboration.
 - **DAG Combinational Loop Detection**: Zero-delay feedback paths ($a \to b \to a$) are detected via 3-color directed acyclic graph (DAG) cycle checks and rejected before synthesis.
 - **Static CDC Verification**: Rejects unsynchronized cross-clock domain transfers at compile time; provides safe crossing via `@sync2ff`.
+
+---
+
+## Pure Zig Comptime eDSL & Desugarer
+
+In addition to standalone compilation with `zhdl`, ZHdl includes a **Zero-Overhead Comptime Embedded DSL (eDSL)** directly in standard Zig (`@import("zhdl")`), along with an integrated source-to-source desugarer:
+
+- **Type-Safe Comptime Types (`zhdl.In`, `zhdl.Out`, `zhdl.Reg`, `zhdl.Clock`, `zhdl.Reset`)**:
+  Build and simulate hardware modules directly in pure Zig using standard structs, zero memory footprint, and compile-time elaboration.
+- **Ergonomic Bit Manipulation**:
+  - `zhdl.cat(.{ a, b, c })`: Zero-overhead bit concatenation with comptime-inferred sum width.
+  - `zhdl.slice(sig, high, low)`: Type-safe bit-slice extraction with compile-time boundary enforcement.
+  - `zhdl.bit(sig, idx)`: Single-bit extraction returning `u1`.
+  - `zhdl.rep(sig, count)`: Bit replication equivalent to SystemVerilog `{count{sig}}`.
+  - `zhdl.mux(cond, a, b)`: Inlined hardware multiplexer with type inference.
+- **Source-to-Source Desugarer (`zhdl desugar`)**:
+  Lowers HDL syntactic sugar (`in`, `out`, `reg`, `wire`, `comb`, `x[7:0]`, `{a, b}`) into 100% valid, idiomatic Zig code parsed and validated by `std.zig.Ast`.
+- **Integrated AST Formatter (`zhdl fmt`)**:
+  Formats Zig/eDSL code directly using Zig's official AST renderer engine (`std.zig.Ast.renderAlloc`) with zero external tooling overhead.
 
 ---
 

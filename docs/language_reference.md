@@ -439,15 +439,15 @@ pub const State = enum(u2) {
 Modules are defined using the first-class `pub module` declaration (or as constants assigned to a `module` block):
 
 ```zig
-pub module Counter {
+pub module Counter(
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
     in en: u1,
     out count: u8,
-
-    // Module items (registers, wires, submodules, flat logic)
+) {
+    // Module items (registers, wires, submodules, comb blocks)
 }
-// Or constant assignment: pub const Counter = module { ... };
+// Or generic: pub module GenericCounter(comptime W: usize, in clk: clock, ...) { ... }
 ```
 
 ### 4.2 Port Declarations (`in`, `out`, `inout`)
@@ -513,12 +513,12 @@ ZHdl enforces "The One Obvious Way" to structure hardware modules:
 - **Procedural Logic Requires Explicit `comb { ... }`**: All procedural statements, control flow (`if`, `switch`, loops), and register state updates must be enclosed in explicit `comb` blocks. Bare anonymous blocks `{ ... }`, floating control flow statements, or module-level register assignments are rejected at compile time.
 
 ```zig
-pub module Counter {
+pub module Counter(
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
     in en: u1,
     out count: u8,
-
+) {
     reg r_count: u8 = 0;
 
     // Declarative wire continuous assignment
@@ -787,12 +787,12 @@ Assigning an import expression to a constant creates a package namespace:
 const math = @import("math_pkg.zhdl");
 const types = @import("protocol_types.zhdl");
 
-pub module Processor {
+pub module Processor(
     in clk: clock,
-    in rst: reset,
+    in rst: reset(.async),
     in hdr: types.Header,          // Dotted type annotation
     out result: u16,
-
+) {
     const mult = math.Multiplier.instantiate(.{
         .a = hdr.src,
         .b = hdr.dst,
@@ -812,11 +812,11 @@ const Adder = @import("alu_ops.zhdl").Adder;
 const alu = @import("alu_ops.zhdl");
 const Subtractor = alu.Subtractor;
 
-pub module Top {
+pub module Top(
     in x: u16,
     in y: u16,
     out s: u16,
-
+) {
     const add0 = Adder.instantiate(.{
         .a = x,
         .b = y,
@@ -831,10 +831,10 @@ Generic module templates can be imported and monomorphized across file boundarie
 ```zig
 const fifo_pkg = @import("fifo_pkg.zhdl");
 
-pub module SystemTop {
+pub module SystemTop(
     in clk: clock,
-    in rst: reset,
-
+    in rst: reset(.async),
+) {
     const fifo8 = fifo_pkg.SyncFifo(8, 32).instantiate(.{
         .clk = clk,
         .rst = rst,
@@ -861,11 +861,11 @@ pub const Packet = packed struct {
 // parser.zhdl
 const proto = @import("protocol.zhdl");
 
-pub module FrameChecker {
+pub module FrameChecker(
     in pkt: proto.Packet,
     out ok: u1,
     out expected_tag: u8,
-
+) {
     ok = pkt.isValid();          // Inlined type method
     expected_tag = proto.MAGIC;  // Package constant
 }
